@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>2-Spieler Testspiel</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-top: 40px;
+    }
+    #status {
+      font-size: 18px;
+      margin-bottom: 20px;
+    }
+    #board {
+      display: grid;
+      grid-template-columns: repeat(3, 100px);
+      grid-template-rows: repeat(3, 100px);
+      gap: 4px;
+    }
+    .cell {
+      background: #eee;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 40px;
+      cursor: pointer;
+      border: 1px solid #999;
+    }
+    .cell:hover {
+      background: #ddd;
+    }
+    #joinArea {
+      margin-bottom: 20px;
+    }
+    input {
+      font-size: 16px;
+      padding: 6px;
+    }
+    button {
+      font-size: 16px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="joinArea">
+    <input id="roomInput" placeholder="Raum-Name (z.B. abc123)" />
+    <button id="joinButton">Beitreten / Erstellen</button>
+  </div>
+
+  <div id="status">Noch keinem Raum beigetreten</div>
+  <div id="board"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
