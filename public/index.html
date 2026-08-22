@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Hex-Brett Spiel</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div id="joinArea">
+    <input id="roomInput" placeholder="Raum-Name (z.B. abc123)" />
+    <button id="joinButton">Beitreten / Erstellen</button>
+  </div>
+
+  <div id="status">Noch keinem Raum beigetreten</div>
+
+  <div id="gameArea">
+    <div id="sideControls">
+      <button id="confirmButton">Züge bestätigen</button>
+      <button id="editButton" class="hidden">Zug bearbeiten</button>
+      <div id="tickDisplay" class="hidden"></div>
+    </div>
+
+    <div id="boardArea">
+      <svg id="board" width="960" height="820"></svg>
+
+      <div id="planPanel" class="plan-panel hidden">
+        <div id="planUnitLabel" class="plan-unit-label"></div>
+        <table id="planTable">
+          <thead><tr></tr></thead>
+          <tbody><tr></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Reihenfolge wichtig: hexBoard.js -> reiter.js -> game.js -->
+  <script src="board/hexBoard.js"></script>
+  <script src="pieces/reiter.js"></script>
+  <script src="game.js"></script>
+
+</body>
+</html>
