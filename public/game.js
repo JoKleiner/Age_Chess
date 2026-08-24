@@ -17,8 +17,8 @@ const confirmButton = document.getElementById('confirmButton');
 const editButton = document.getElementById('editButton');
 const tickDisplay = document.getElementById('tickDisplay');
 
-const OFFSET_X = 480;
-const OFFSET_Y = 410;
+const OFFSET_X = 214;
+const OFFSET_Y = 297;
 
 let myRole = null;
 let myRoomId = null;
@@ -27,11 +27,44 @@ let myPlans = {};          // unitId -> geplante Schritte, nur für EIGENE Einhe
 let selectedUnitId = null; // welche eigene Einheit wird gerade geplant
 let confirmed = false;
 
-const hexElements = HexBoard.render(svg, {
-  offsetX: OFFSET_X,
-  offsetY: OFFSET_Y,
-  onCellClick: handleBoardClick
-});
+// Spieler Rot bekommt das Brett um 180° gedreht angezeigt (eigene Einheiten unten
+// im Bild), Farben bleiben aber echt (rot ist rot, blau ist blau).
+// isFlipped() ist erst ab dem 'joined'-Event sinnvoll (wenn myRole bekannt ist).
+function isFlipped() {
+  return myRole === 'red';
+}
+
+// Bild-Chip einer Einheit: media/Reiter_{Blau|Rot}{chipIndex}.png
+function chipImagePath(unit) {
+  const colorName = unit.role === 'blue' ? 'Blau' : 'Rot';
+  return `media/Reiter_${colorName}${unit.chipIndex}.png`;
+}
+
+// Wandelt Modell-Koordinaten (q,r) in Bildschirm-Pixel um, unter Berücksichtigung
+// der Drehung für Spieler Rot. Das Brett ist punktsymmetrisch um (0,0), daher reicht
+// es, die Pixel-Koordinaten zu negieren.
+function toScreen(q, r) {
+  const { x, y } = HexBoard.axialToPixel(q, r);
+  const flip = isFlipped();
+  return { x: (flip ? -x : x) + OFFSET_X, y: (flip ? -y : y) + OFFSET_Y };
+}
+
+// Eigene Gruppe für das Brett, damit es nach Rollen-Zuweisung (bekannt erst bei
+// 'joined') neu (gedreht) gezeichnet werden kann, aber unter Pfad-Vorschau und
+// Einheiten liegen bleibt (SVG-Zeichenreihenfolge = DOM-Reihenfolge).
+const hexLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+svg.appendChild(hexLayer);
+let hexElements = {};
+
+function initBoard() {
+  hexLayer.innerHTML = '';
+  hexElements = HexBoard.render(hexLayer, {
+    offsetX: OFFSET_X,
+    offsetY: OFFSET_Y,
+    flip: isFlipped(),
+    onCellClick: handleBoardClick
+  });
+}
 
 // Gruppe für die Pfad-Vorschau (Linie + Ghost-Kreis) der ausgewählten Einheit
 const pathGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -39,31 +72,38 @@ svg.appendChild(pathGroup);
 
 // ---------- Einheiten zeichnen (alle, aus reiter.js) ----------
 
-const unitCircles = {};
+const UNIT_CHIP_SIZE = Reiter.radius * 3.2; // Bild-Chip etwas größer als der alte Kreis
+
+const unitElements = {};
 Reiter.units.forEach(unit => {
-  unitCircles[unit.id] = createUnitCircle(unit);
+  unitElements[unit.id] = createUnitImage(unit);
 });
 
-function createUnitCircle(unit) {
-  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  circle.setAttribute('r', Reiter.radius);
-  circle.classList.add('unit', `unit-${unit.role}`);
-  circle.style.display = 'none'; // erst sichtbar, sobald Startposition bekannt ist
-  circle.addEventListener('click', (event) => {
+function createUnitImage(unit) {
+  const image = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+  const href = chipImagePath(unit);
+  image.setAttribute('href', href);
+  image.setAttributeNS('http://www.w3.org/1999/xlink', 'href', href);
+  image.setAttribute('width', UNIT_CHIP_SIZE);
+  image.setAttribute('height', UNIT_CHIP_SIZE);
+  image.classList.add('unit');
+  image.style.display = 'none'; // erst sichtbar, sobald Startposition bekannt ist
+  image.addEventListener('click', (event) => {
     event.stopPropagation();
     if (unit.role === myRole) selectUnit(unit.id);
   });
-  svg.appendChild(circle);
-  return circle;
+  svg.appendChild(image);
+  return image;
 }
 
 function renderUnit(unitId) {
   const pos = positions[unitId];
   if (!pos) return;
-  const { x, y } = HexBoard.axialToPixel(pos.q, pos.r);
-  unitCircles[unitId].setAttribute('cx', x + OFFSET_X);
-  unitCircles[unitId].setAttribute('cy', y + OFFSET_Y);
-  unitCircles[unitId].style.display = 'block';
+  const { x, y } = toScreen(pos.q, pos.r);
+  const image = unitElements[unitId];
+  image.setAttribute('x', x - UNIT_CHIP_SIZE / 2);
+  image.setAttribute('y', y - UNIT_CHIP_SIZE / 2);
+  image.style.display = 'block';
 }
 
 function renderAllUnits() {
@@ -85,6 +125,7 @@ joinButton.addEventListener('click', () => {
 socket.on('joined', ({ role, positions: serverPositions }) => {
   myRole = role;
   positions = serverPositions;
+  initBoard();
   renderAllUnits();
 
   // Für jede eigene Einheit einen leeren Plan vorbereiten
@@ -245,8 +286,8 @@ function renderPath() {
 
   const startPos = positions[selectedUnitId];
   const points = [startPos, ...plan].map(p => {
-    const { x, y } = HexBoard.axialToPixel(p.q, p.r);
-    return `${x + OFFSET_X},${y + OFFSET_Y}`;
+    const { x, y } = toScreen(p.q, p.r);
+    return `${x},${y}`;
   });
 
   const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
@@ -255,10 +296,10 @@ function renderPath() {
   pathGroup.appendChild(line);
 
   const last = plan[plan.length - 1];
-  const { x, y } = HexBoard.axialToPixel(last.q, last.r);
+  const { x, y } = toScreen(last.q, last.r);
   const ghost = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  ghost.setAttribute('cx', x + OFFSET_X);
-  ghost.setAttribute('cy', y + OFFSET_Y);
+  ghost.setAttribute('cx', x);
+  ghost.setAttribute('cy', y);
   ghost.setAttribute('r', Reiter.radius);
   ghost.classList.add(`ghost-${myRole}`);
   pathGroup.appendChild(ghost);

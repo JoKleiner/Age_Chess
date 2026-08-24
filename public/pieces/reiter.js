@@ -12,11 +12,12 @@
     maxSteps: 4,
     radius: HexBoardRef.HEX_SIZE * 0.4,
 
+    // chipIndex wählt das Bild media/Reiter_{Blau|Rot}{chipIndex}.png
     units: [
-      { id: 'blue1', role: 'blue', label: 'Reiter 1', start: { col: 'E', row: 3 } },
-      { id: 'blue2', role: 'blue', label: 'Reiter 2', start: { col: 'D', row: 3 } },
-      { id: 'red1',  role: 'red',  label: 'Reiter 1', start: { col: 'E', row: 9 } },
-      { id: 'red2',  role: 'red',  label: 'Reiter 2', start: { col: 'D', row: 9 } }
+      { id: 'blue1', role: 'blue', label: 'Reiter 1', chipIndex: 1, start: { col: 'D', row: 3 } },
+      { id: 'blue2', role: 'blue', label: 'Reiter 2', chipIndex: 2, start: { col: 'C', row: 3 } },
+      { id: 'red1',  role: 'red',  label: 'Reiter 1', chipIndex: 1, start: { col: 'D', row: 9 } },
+      { id: 'red2',  role: 'red',  label: 'Reiter 2', chipIndex: 2, start: { col: 'C', row: 9 } }
     ]
   };
 

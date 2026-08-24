@@ -2,9 +2,16 @@ body {
   font-family: sans-serif;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  margin-top: 20px;
+  align-items: stretch;
+  margin: 0;
+  padding: 10px;
   background: #f5f5f0;
+  box-sizing: border-box;
+}
+
+#joinArea,
+#status {
+  text-align: center;
 }
 
 #status {
@@ -29,12 +36,9 @@ body {
 .hex:hover      { fill: #ffe08a; }
 
 .unit {
-  stroke-width: 2;
   pointer-events: auto;
   cursor: pointer;
 }
-.unit-blue { fill: #3366cc; stroke: #1a3366; }
-.unit-red  { fill: #cc3333; stroke: #661111; }
 
 .ghost-blue { fill: #aac2f2; stroke: #3366cc; stroke-width: 2; pointer-events: none; }
 .ghost-red  { fill: #f2aaaa; stroke: #cc3333; stroke-width: 2; pointer-events: none; }
@@ -67,54 +71,66 @@ body {
 
 #gameArea {
   display: flex;
-  align-items: flex-start;
-  gap: 20px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
 }
 
 #sideControls {
   display: flex;
-  flex-direction: column;
-  padding-top: 20px;
+  flex-direction: row;
+  gap: 10px;
 }
 #sideControls button {
+  flex: 1;
   font-size: 15px;
-  padding: 8px 16px;
+  padding: 10px 12px;
   cursor: pointer;
 }
 #sideControls button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
 }
-#editButton {
-  margin-top: 8px;
-}
 #tickDisplay {
   margin-top: 10px;
   font-size: 14px;
   color: #444;
+  text-align: center;
 }
 
 #boardArea {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
+}
+
+/* Spielfeld nimmt die volle Bildschirmbreite ein; viewBox im HTML sorgt
+   für proportionale Skalierung der Höhe. */
+#board {
+  width: 100%;
+  height: auto;
+  display: block;
 }
 
 .plan-panel {
   margin-top: 4px;
+  width: 100%;
 }
 .plan-unit-label {
   font-size: 13px;
   font-weight: bold;
   color: #444;
   margin-bottom: 4px;
+  text-align: center;
 }
 .plan-panel table {
   border-collapse: collapse;
+  width: 100%;
+  table-layout: fixed;
 }
 .plan-panel th, .plan-panel td {
   border: 1px solid #ccc;
-  padding: 4px 14px;
+  padding: 8px 2px;
   text-align: center;
   font-size: 13px;
 }

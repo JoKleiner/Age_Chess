@@ -5,16 +5,17 @@
 const HexBoard = (function () {
 
   const HEX_SIZE = 36;       // Abstand Mittelpunkt -> Ecke
-  const BOARD_RADIUS = 4;    // Grundform: 9 Spalten (A-I)
+  const BOARD_RADIUS = 4;    // Zeilen-Ausdehnung je Spalte (Hex-Radius, unverändert)
+  const COL_RADIUS = 3;      // Sichtbare Spalten: 7 Spalten (A-G), A und I entfernt
 
   // ---- Spalte (Buchstabe) <-> internes q ----
-  // A = -4, B = -3, ... E = 0 (Mitte), ... I = 4
+  // A = -3, B = -2, ... D = 0 (Mitte), ... G = 3
   function qFromCol(col) {
-    return col.toUpperCase().charCodeAt(0) - 'A'.charCodeAt(0) - 4;
+    return col.toUpperCase().charCodeAt(0) - 'A'.charCodeAt(0) - COL_RADIUS;
   }
 
   function colFromQ(q) {
-    return String.fromCharCode('A'.charCodeAt(0) + q + 4);
+    return String.fromCharCode('A'.charCodeAt(0) + q + COL_RADIUS);
   }
 
   // ---- Reihe (Nummer 1-11) <-> internes r ----
@@ -36,57 +37,47 @@ const HexBoard = (function () {
     return { col: colFromQ(q), row: rowFromR(r) };
   }
 
-  // ======================================================================
-  // HIER SELBST FELDER ENTFERNEN / HINZUFÜGEN (Format: { col: 'A', row: 1 })
-  // ======================================================================
-
-  const REMOVED_CELLS = [
-    // Beispiel: { col: 'A', row: 3 },
-  ];
+  const REMOVED_CELLS = [];
 
   const ADDED_CELLS = [
     { col: 'A', row: 1 },
     { col: 'B', row: 1 },
-    { col: 'C', row: 1 },
-    { col: 'A', row: 7 },
-    { col: 'B', row: 8 },
-    { col: 'C', row: 9 },
+    { col: 'A', row: 8 },
+    { col: 'B', row: 9 },
+    { col: 'F', row: 11 },
     { col: 'G', row: 11 },
-    { col: 'H', row: 11 },
-    { col: 'I', row: 11 },
-    { col: 'G', row: 3 },
-    { col: 'H', row: 4 },
-    { col: 'I', row: 5 },
+    { col: 'F', row: 3 },
+    { col: 'G', row: 4 },
   ];
 
   const BLUE_CELLS = [
+    { col: 'A', row: 1 },
     { col: 'B', row: 1 },
-    { col: 'C', row: 1 },
+    { col: 'B', row: 2 },
     { col: 'C', row: 2 },
+    { col: 'C', row: 3 },
     { col: 'D', row: 2 },
     { col: 'D', row: 3 },
-    { col: 'E', row: 2 },
     { col: 'E', row: 3 },
+    { col: 'E', row: 4 },
     { col: 'F', row: 3 },
     { col: 'F', row: 4 },
-    { col: 'G', row: 3 },
     { col: 'G', row: 4 },
-    { col: 'H', row: 4 },
   ];
 
   const RED_CELLS = [
+    { col: 'A', row: 8 },
     { col: 'B', row: 8 },
+    { col: 'B', row: 9 },
     { col: 'C', row: 8 },
     { col: 'C', row: 9 },
-    { col: 'D', row: 8 },
     { col: 'D', row: 9 },
+    { col: 'D', row: 10 },
     { col: 'E', row: 9 },
     { col: 'E', row: 10 },
-    { col: 'F', row: 9 },
     { col: 'F', row: 10 },
-    { col: 'G', row: 10 },
+    { col: 'F', row: 11 },
     { col: 'G', row: 11 },
-    { col: 'H', row: 11 },
   ];
 
   // ---------------------------------------------------------
@@ -127,7 +118,7 @@ const HexBoard = (function () {
   function generateBoardCells() {
     const cells = [];
 
-    for (let q = -BOARD_RADIUS; q <= BOARD_RADIUS; q++) {
+    for (let q = -COL_RADIUS; q <= COL_RADIUS; q++) {
       const rMin = Math.max(-BOARD_RADIUS, -q - BOARD_RADIUS);
       const rMax = Math.min(BOARD_RADIUS, -q + BOARD_RADIUS);
       for (let r = rMin; r <= rMax; r++) {
@@ -156,7 +147,7 @@ const HexBoard = (function () {
     return filtered;
   }
 
-  // Berechnet für jede Zelle Pixel-Position, Zeilen-Nummer, Zone und Hell/Dunkel
+  // Berechnet für jede Zelle Pixel-Position, Zeilen-Nummer, Zone und Hell/Dunkel.
   function computeLayout(cells) {
     const redKeys = new Set(RED_CELLS.map(c => {
       const { q, r } = cellRef(c.col, c.row);
@@ -186,13 +177,18 @@ const HexBoard = (function () {
 
   // Zeichnet das Brett in das übergebene <svg>-Element und gibt eine Map
   // key -> <polygon> zurück, damit andere Module (game.js) darauf reagieren können.
-  function render(svgElement, { offsetX, offsetY, onCellClick }) {
+  // flip: dreht nur die Darstellung um 180° (für Spieler Rot) - Zonenfarben bleiben
+  // unverändert (rot ist rot, blau ist blau). Das Brett ist punktsymmetrisch um (0,0),
+  // daher genügt es, die berechneten Pixel-Koordinaten zu negieren
+  // (axialToPixel(-q,-r) === -axialToPixel(q,r)); die echten q/r-Modellwerte im
+  // dataset bleiben unverändert, Klicks landen also weiterhin auf der richtigen Zelle.
+  function render(svgElement, { offsetX, offsetY, flip, onCellClick }) {
     const cells = computeLayout(generateBoardCells());
     const hexElements = {};
 
     cells.forEach(cell => {
-      const cx = cell.x + offsetX;
-      const cy = cell.y + offsetY;
+      const cx = (flip ? -cell.x : cell.x) + offsetX;
+      const cy = (flip ? -cell.y : cell.y) + offsetY;
 
       const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
       polygon.setAttribute('points', hexCorners(cx, cy));
@@ -216,6 +212,7 @@ const HexBoard = (function () {
   return {
     HEX_SIZE,
     BOARD_RADIUS,
+    COL_RADIUS,
     DIRECTIONS,
     qFromCol,
     colFromQ,
