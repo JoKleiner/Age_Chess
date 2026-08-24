@@ -37,47 +37,49 @@ const HexBoard = (function () {
     return { col: colFromQ(q), row: rowFromR(r) };
   }
 
-  const REMOVED_CELLS = [];
-
-  const ADDED_CELLS = [
-    { col: 'A', row: 1 },
-    { col: 'B', row: 1 },
-    { col: 'A', row: 8 },
-    { col: 'B', row: 9 },
-    { col: 'F', row: 11 },
-    { col: 'G', row: 11 },
-    { col: 'F', row: 3 },
-    { col: 'G', row: 4 },
+  // Letzte Reihe an beiden Enden entfernt (Brett war zu groß): die alten
+  // ADDED_CELLS-Ecken (A1,B1,F3,G4 oben / A8,B9,F11,G11 unten) fallen komplett
+  // weg, die restlichen Rand-Zellen werden aus der natürlichen Grundform entfernt.
+  const REMOVED_CELLS = [
+    { col: 'C', row: 2 },
+    { col: 'D', row: 2 },
+    { col: 'E', row: 3 },
+    { col: 'C', row: 9 },
+    { col: 'D', row: 10 },
+    { col: 'E', row: 10 },
   ];
 
+  const ADDED_CELLS = [];
+
+  // Zonen um 1 Reihe Richtung Mitte verschoben (an den neuen Rand angepasst).
   const BLUE_CELLS = [
-    { col: 'A', row: 1 },
-    { col: 'B', row: 1 },
+    { col: 'A', row: 2 },
     { col: 'B', row: 2 },
-    { col: 'C', row: 2 },
+    { col: 'B', row: 3 },
     { col: 'C', row: 3 },
-    { col: 'D', row: 2 },
+    { col: 'C', row: 4 },
     { col: 'D', row: 3 },
-    { col: 'E', row: 3 },
+    { col: 'D', row: 4 },
     { col: 'E', row: 4 },
-    { col: 'F', row: 3 },
+    { col: 'E', row: 5 },
     { col: 'F', row: 4 },
-    { col: 'G', row: 4 },
+    { col: 'F', row: 5 },
+    { col: 'G', row: 5 },
   ];
 
   const RED_CELLS = [
-    { col: 'A', row: 8 },
+    { col: 'A', row: 7 },
+    { col: 'B', row: 7 },
     { col: 'B', row: 8 },
-    { col: 'B', row: 9 },
+    { col: 'C', row: 7 },
     { col: 'C', row: 8 },
-    { col: 'C', row: 9 },
+    { col: 'D', row: 8 },
     { col: 'D', row: 9 },
-    { col: 'D', row: 10 },
+    { col: 'E', row: 8 },
     { col: 'E', row: 9 },
-    { col: 'E', row: 10 },
+    { col: 'F', row: 9 },
     { col: 'F', row: 10 },
-    { col: 'F', row: 11 },
-    { col: 'G', row: 11 },
+    { col: 'G', row: 10 },
   ];
 
   // ---------------------------------------------------------

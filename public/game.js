@@ -18,7 +18,7 @@ const editButton = document.getElementById('editButton');
 const tickDisplay = document.getElementById('tickDisplay');
 
 const OFFSET_X = 214;
-const OFFSET_Y = 297;
+const OFFSET_Y = 234.5;
 
 let myRole = null;
 let myRoomId = null;
