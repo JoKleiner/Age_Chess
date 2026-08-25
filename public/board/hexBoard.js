@@ -84,6 +84,25 @@ const HexBoard = (function () {
 
   // ---------------------------------------------------------
 
+  const redZoneKeys = new Set(RED_CELLS.map(c => {
+    const { q, r } = cellRef(c.col, c.row);
+    return keyOf(q, r);
+  }));
+  const blueZoneKeys = new Set(BLUE_CELLS.map(c => {
+    const { q, r } = cellRef(c.col, c.row);
+    return keyOf(q, r);
+  }));
+
+  // Liefert 'red', 'blue' oder 'gray' fuer eine Zelle - genutzt sowohl beim
+  // Zeichnen (computeLayout) als auch serverseitig, um Platzierungen auf die
+  // eigene Zone zu beschraenken.
+  function zoneOf(q, r) {
+    const key = keyOf(q, r);
+    if (redZoneKeys.has(key)) return 'red';
+    if (blueZoneKeys.has(key)) return 'blue';
+    return 'gray';
+  }
+
   function axialToPixel(q, r) {
     const x = HEX_SIZE * 1.5 * q;
     const y = HEX_SIZE * Math.sqrt(3) * (r + q / 2);
@@ -151,23 +170,10 @@ const HexBoard = (function () {
 
   // Berechnet für jede Zelle Pixel-Position, Zeilen-Nummer, Zone und Hell/Dunkel.
   function computeLayout(cells) {
-    const redKeys = new Set(RED_CELLS.map(c => {
-      const { q, r } = cellRef(c.col, c.row);
-      return keyOf(q, r);
-    }));
-    const blueKeys = new Set(BLUE_CELLS.map(c => {
-      const { q, r } = cellRef(c.col, c.row);
-      return keyOf(q, r);
-    }));
-
     return cells.map(c => {
       const { x, y } = axialToPixel(c.q, c.r);
       const row = 6 - c.r; // Reihen-Nummer, siehe rFromRow
-
-      const key = keyOf(c.q, c.r);
-      let zone = 'gray';
-      if (redKeys.has(key)) zone = 'red';
-      else if (blueKeys.has(key)) zone = 'blue';
+      const zone = zoneOf(c.q, c.r);
 
       // Gerade Reihen-Nummern = dunkel, ungerade = hell
       const isDark = row % 2 === 0;
@@ -222,6 +228,7 @@ const HexBoard = (function () {
     rowFromR,
     cellRef,
     labelOf,
+    zoneOf,
     axialToPixel,
     hexCorners,
     hexDistance,

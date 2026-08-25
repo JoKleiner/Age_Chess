@@ -28,7 +28,16 @@
       </div>
     </div>
 
-    <div id="sideControls">
+    <div id="setupPanel" class="setup-panel hidden">
+      <div id="setupCounter" class="setup-counter"></div>
+      <div id="stackList" class="stack-list"></div>
+      <div id="setupControls">
+        <button id="placementReadyButton">Fertig</button>
+        <button id="placementEditButton" class="hidden">Platzierung bearbeiten</button>
+      </div>
+    </div>
+
+    <div id="sideControls" class="hidden">
       <button id="confirmButton">Züge bestätigen</button>
       <button id="editButton" class="hidden">Zug bearbeiten</button>
       <div id="tickDisplay" class="hidden"></div>
@@ -36,9 +45,9 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <!-- Reihenfolge wichtig: hexBoard.js -> reiter.js -> game.js -->
+  <!-- Reihenfolge wichtig: hexBoard.js -> unitTypes.js -> game.js -->
   <script src="board/hexBoard.js"></script>
-  <script src="pieces/reiter.js"></script>
+  <script src="pieces/unitTypes.js"></script>
   <script src="game.js"></script>
 
 </body>
