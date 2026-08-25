@@ -152,7 +152,10 @@ socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits }) => {
   placedByType = {};
 
   initBoard();
-  statusEl.textContent = `Du bist Spieler ${role === 'blue' ? 'Blau' : 'Rot'}. Warte auf zweiten Spieler...`;
+  setupPanel.classList.remove('hidden');
+  highlightOwnZone();
+  renderStackList();
+  statusEl.textContent = `Du bist Spieler ${role === 'blue' ? 'Blau' : 'Rot'}. Wähle deine Einheiten aus und platziere sie auf deinem Bereich.`;
 });
 
 socket.on('roomFull', () => {
@@ -160,10 +163,9 @@ socket.on('roomFull', () => {
 });
 
 socket.on('placementPhaseStart', () => {
-  setupPanel.classList.remove('hidden');
-  highlightOwnZone();
-  renderStackList();
-  statusEl.textContent = 'Wähle deine Einheiten aus und platziere sie auf deinem Bereich.';
+  if (!placementReady) {
+    statusEl.textContent = 'Gegenspieler ist da. Wähle deine Einheiten aus und platziere sie auf deinem Bereich.';
+  }
 });
 
 socket.on('placementAccepted', () => {
@@ -369,9 +371,9 @@ function handlePlacementClick(q, r) {
   createPlacementChip(unitId, armedTypeKey, chipIndex, q, r);
   socket.emit('placeUnit', { roomId: myRoomId, typeKey: armedTypeKey, q, r });
 
-  if (list.length >= type.maxPerPlayer || totalPlacedCount() >= maxUnitsPerPlayer) {
-    armedTypeKey = null;
-  }
+  // Nach jeder Platzierung wird die Auswahl wieder gelöst - der Spieler muss
+  // den Stapel erneut anklicken, um die nächste Einheit zu platzieren.
+  armedTypeKey = null;
   renderStackList();
   highlightOwnZone();
 }
