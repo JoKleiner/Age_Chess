@@ -179,17 +179,18 @@ body {
 .stack-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
+  gap: 10px;
 }
 .stack-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  width: 76px;
-  padding: 6px 4px;
+  flex: 1 1 0;
+  min-width: 90px;
+  max-width: 220px;
+  padding: 10px 6px;
   border: 2px solid #ccc;
-  border-radius: 8px;
+  border-radius: 10px;
   background: #fff;
   cursor: pointer;
   text-align: center;
@@ -203,14 +204,16 @@ body {
   cursor: not-allowed;
 }
 .stack-chip-preview {
-  width: 40px;
-  height: 40px;
+  width: 70%;
+  max-width: 100px;
+  min-width: 44px;
+  aspect-ratio: 1 / 1;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  margin-bottom: 4px;
-  font-size: 11px;
+  margin-bottom: 6px;
+  font-size: clamp(11px, 3vw, 20px);
   font-weight: bold;
   color: #fff;
 }
@@ -224,11 +227,11 @@ body {
   color: #888;
 }
 .stack-label {
-  font-size: 11px;
+  font-size: clamp(11px, 2.2vw, 15px);
   color: #333;
 }
 .stack-count {
-  font-size: 11px;
+  font-size: clamp(11px, 2vw, 13px);
   color: #777;
 }
 #setupControls {

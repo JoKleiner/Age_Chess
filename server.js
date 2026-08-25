@@ -222,7 +222,7 @@ io.on('connection', (socket) => {
     const room = rooms[roomId];
     if (!room) return;
     const role = socket.data.role;
-    if (!role) return;
+    if (!role || room.phase !== 'placement') return;
 
     room.ready[role] = false;
   });
