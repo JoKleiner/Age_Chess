@@ -25,7 +25,7 @@
       { key: 'reiter', label: 'Reiter', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Reiter', imageBase: 'Reiter' } },
       { key: 'schwertkaempfer', label: 'Schwertkämpfer', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Schild', imageBase: 'Schild' } },
       { key: 'bogenschuetze', label: 'Bogenschütze', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Schuetze', imageBase: 'Schütze' } },
-      { key: 'katapult', label: 'Katapult', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Lanze', imageBase: 'Lanze' } }
+      { key: 'lanze', label: 'Lanze', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Lanze', imageBase: 'Lanze' } }
     ]
   };
 
