@@ -4,7 +4,10 @@
 // Arten hinweg) MAX_UNITS_PER_PLAYER Einheiten platzieren.
 //
 // "chip" beschreibt, wie eine Einheit gezeichnet wird:
-//   { kind: 'image', imageBase: 'Reiter' } -> media/{imageBase}_{Blau|Rot}{n}.png
+//   { kind: 'image', imageFolder: 'Reiter', imageBase: 'Reiter' }
+//     -> media/{imageFolder}/{imageBase}_{Blau|Rot}{n}.png
+//     (imageBase kann vom Ordnernamen abweichen, z.B. Ordner "Schuetze" mit
+//     Dateien "Schütze_...")
 //   { kind: 'placeholder', letter: 'S' }   -> generierter Kreis-Chip mit Buchstabe
 //     (fuer Arten ohne eigenes Artwork - einfach durch 'image' ersetzen, sobald
 //     Bilder vorhanden sind)
@@ -19,10 +22,10 @@
     CHIP_RADIUS_FACTOR: 0.4, // * HexBoard.HEX_SIZE
 
     TYPES: [
-      { key: 'reiter', label: 'Reiter', maxPerPlayer: 3, chip: { kind: 'image', imageBase: 'Reiter' } },
-      { key: 'schwertkaempfer', label: 'Schwertkämpfer', maxPerPlayer: 3, chip: { kind: 'placeholder', letter: 'S' } },
-      { key: 'bogenschuetze', label: 'Bogenschütze', maxPerPlayer: 3, chip: { kind: 'placeholder', letter: 'B' } },
-      { key: 'katapult', label: 'Katapult', maxPerPlayer: 3, chip: { kind: 'placeholder', letter: 'K' } }
+      { key: 'reiter', label: 'Reiter', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Reiter', imageBase: 'Reiter' } },
+      { key: 'schwertkaempfer', label: 'Schwertkämpfer', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Schild', imageBase: 'Schild' } },
+      { key: 'bogenschuetze', label: 'Bogenschütze', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Schuetze', imageBase: 'Schütze' } },
+      { key: 'katapult', label: 'Katapult', maxPerPlayer: 3, chip: { kind: 'image', imageFolder: 'Lanze', imageBase: 'Lanze' } }
     ]
   };
 

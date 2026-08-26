@@ -1,22 +1,30 @@
+html {
+  height: 100%;
+}
+
 body {
   font-family: sans-serif;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   margin: 0;
-  padding: 10px;
+  padding: 4px 8px 8px;
+  gap: 4px;
   background: #f5f5f0;
   box-sizing: border-box;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 #joinArea,
 #status {
   text-align: center;
+  flex: 0 0 auto;
 }
 
 #status {
   font-size: 16px;
-  margin-bottom: 10px;
   color: #333;
 }
 
@@ -24,6 +32,28 @@ body {
   stroke: #555;
   stroke-width: 1;
   cursor: pointer;
+}
+
+.label-hex {
+  stroke: #555;
+  stroke-width: 1;
+  pointer-events: none;
+}
+.label-bridge {
+  cursor: default;
+  pointer-events: none;
+}
+.label-hex.label-dark    { fill: #d4d4d4; }
+.label-hex.label-light   { fill: #ffffff; }
+.label-hex.label-neutral { fill: #ececec; }
+
+.board-label {
+  font-family: sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  fill: #555;
+  pointer-events: none;
+  user-select: none;
 }
 
 .hex.gray-light { fill: #ffffff; }
@@ -67,9 +97,15 @@ body {
   pointer-events: none;
 }
 
-#joinArea {
-  margin-bottom: 12px;
+#joinArea,
+#status,
+#gameArea {
+  width: 100%;
+  max-width: 640px;
+  margin-left: auto;
+  margin-right: auto;
 }
+
 #joinArea input {
   font-size: 16px;
   padding: 6px;
@@ -81,17 +117,20 @@ body {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 #gameArea {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
+  gap: 8px;
 }
 
 #sideControls {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: row;
   gap: 10px;
@@ -107,35 +146,44 @@ body {
   opacity: 0.6;
 }
 #tickDisplay {
-  margin-top: 10px;
+  margin-top: 6px;
   font-size: 14px;
   color: #444;
   text-align: center;
 }
 
 #boardArea {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: stretch;
+  gap: 2px;
 }
 
-/* Spielfeld nimmt die volle Bildschirmbreite ein; viewBox im HTML sorgt
-   für proportionale Skalierung der Höhe. */
+/* Füllt den kompletten verbleibenden Platz von #boardArea; preserveAspectRatio
+   auf dem SVG-Element sorgt dafür, dass der Inhalt proportional (letterboxed)
+   eingepasst wird, egal ob die Höhe oder die Breite der Flaschenhals ist. */
 #board {
+  flex: 1 1 auto;
+  min-height: 0;
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
 }
 
 .plan-panel {
-  margin-top: 4px;
+  flex: 0 0 auto;
   width: 100%;
 }
+.plan-panel-invisible {
+  visibility: hidden;
+}
 .plan-unit-label {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: bold;
-  color: #444;
-  margin-bottom: 4px;
+  color: #333;
+  margin-bottom: 2px;
   text-align: center;
 }
 .plan-panel table {
@@ -144,15 +192,16 @@ body {
   table-layout: fixed;
 }
 .plan-panel th, .plan-panel td {
-  border: 1px solid #ccc;
+  border: 2px solid #888;
   padding: 8px 2px;
   text-align: center;
-  font-size: 13px;
+  font-size: 16px;
+  font-weight: 600;
 }
 .plan-panel th {
-  background: #f0f0f0;
-  font-weight: normal;
-  color: #555;
+  background: #e8e8e0;
+  font-weight: bold;
+  color: #333;
 }
 .clickable-cell {
   cursor: pointer;
@@ -166,10 +215,11 @@ body {
 }
 
 .setup-panel {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
+  gap: 8px;
 }
 .setup-counter {
   text-align: center;
@@ -240,11 +290,35 @@ body {
 }
 #setupControls button {
   flex: 1;
-  font-size: 15px;
-  padding: 10px 12px;
+  font-size: 13px;
+  padding: 6px 10px;
   cursor: pointer;
 }
 #setupControls button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* Handy (Touchgeräte): unabhängig von der Fensterbreite erkannt über
+   Touch-Pointer, damit ein schmales Browser-Fenster nicht versehentlich
+   die Handy-Größen bekommt. */
+@media (pointer: coarse) {
+  .stack-list {
+    gap: 6px;
+  }
+  .stack-card {
+    min-width: 0;
+    padding: 6px 2px;
+  }
+  .stack-chip-preview {
+    min-width: 32px;
+    margin-bottom: 4px;
+    font-size: clamp(9px, 3.5vw, 16px);
+  }
+  .stack-label {
+    font-size: clamp(9px, 2.6vw, 13px);
+  }
+  .stack-count {
+    font-size: clamp(9px, 2.4vw, 11px);
+  }
 }

@@ -12,8 +12,10 @@ const socket = io();
 
 const svg = document.getElementById('board');
 const statusEl = document.getElementById('status');
+const gameAreaEl = document.getElementById('gameArea');
 const joinButton = document.getElementById('joinButton');
 const roomInput = document.getElementById('roomInput');
+const joinAreaEl = document.getElementById('joinArea');
 const planPanel = document.getElementById('planPanel');
 const planUnitLabel = document.getElementById('planUnitLabel');
 const planHeadRow = document.querySelector('#planTable thead tr');
@@ -81,6 +83,16 @@ function initBoard() {
     flip: isFlipped(),
     onCellClick: handleBoardClick
   });
+
+  // viewBox an den tatsächlichen Inhalt (inkl. Spalten-/Reihen-Beschriftung)
+  // anpassen, damit nichts abgeschnitten wird, egal wie groß die Ränder
+  // durch die Labels ausfallen.
+  const bbox = hexLayer.getBBox();
+  const padding = 4;
+  svg.setAttribute(
+    'viewBox',
+    `${bbox.x - padding} ${bbox.y - padding} ${bbox.width + padding * 2} ${bbox.height + padding * 2}`
+  );
 }
 
 // Gruppe für die Pfad-Vorschau (Linie + Ghost-Kreis) der ausgewählten Einheit
@@ -97,7 +109,7 @@ function createChipElement(role, typeKey, chipIndex) {
 
   if (type.chip.kind === 'image') {
     const colorName = role === 'blue' ? 'Blau' : 'Rot';
-    const href = `media/${type.chip.imageBase}_${colorName}${chipIndex}.png`;
+    const href = `media/${type.chip.imageFolder}/${type.chip.imageBase}_${colorName}${chipIndex}.png`;
     el = document.createElementNS(SVG_NS, 'image');
     el.setAttribute('href', href);
     el.setAttributeNS(XLINK_NS, 'href', href);
@@ -151,14 +163,18 @@ socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits }) => {
   phase = 'placement';
   placedByType = {};
 
-  initBoard();
+  joinAreaEl.classList.add('hidden');
+  statusEl.classList.remove('hidden');
+  gameAreaEl.classList.remove('hidden');
   setupPanel.classList.remove('hidden');
+  initBoard();
   highlightOwnZone();
   renderStackList();
   statusEl.textContent = `Du bist Spieler ${role === 'blue' ? 'Blau' : 'Rot'}. Wähle deine Einheiten aus und platziere sie auf deinem Bereich.`;
 });
 
 socket.on('roomFull', () => {
+  statusEl.classList.remove('hidden');
   statusEl.textContent = 'Dieser Raum ist bereits voll. Anderen Namen wählen.';
 });
 
@@ -206,6 +222,14 @@ socket.on('gameStart', ({ units, positions: serverPositions }) => {
   Object.values(unitsById).filter(u => u.role === myRole).forEach(u => {
     myPlans[u.id] = [];
   });
+
+  // Plan-Panel bleibt ab jetzt permanent im Layout (nur unsichtbar, wenn keine
+  // Einheit ausgewählt ist), damit das Spielfeld beim Ein-/Ausblenden der
+  // Tabelle nicht die Größe ändert.
+  planPanel.classList.remove('hidden');
+  planPanel.classList.add('plan-panel-invisible');
+  planUnitLabel.textContent = ' ';
+  renderPlanTable();
 
   const roleName = myRole === 'blue' ? 'Blau' : 'Rot';
   statusEl.textContent = `Spiel gestartet! Du bist ${roleName}. Klick auf eine deiner Einheiten, um Züge zu planen.`;
@@ -281,7 +305,7 @@ function renderStackList() {
     } else if (type.chip.kind === 'image') {
       const img = document.createElement('img');
       const colorName = myRole === 'blue' ? 'Blau' : 'Rot';
-      img.src = `media/${type.chip.imageBase}_${colorName}${nextIndex}.png`;
+      img.src = `media/${type.chip.imageFolder}/${type.chip.imageBase}_${colorName}${nextIndex}.png`;
       img.alt = type.label;
       preview.appendChild(img);
     } else {
@@ -433,7 +457,7 @@ function renderAllUnitsForPlay() {
 
 function selectUnit(unitId) {
   selectedUnitId = unitId;
-  planPanel.classList.remove('hidden');
+  planPanel.classList.remove('plan-panel-invisible');
 
   const unit = unitsById[unitId];
   planUnitLabel.textContent = unit.label;
@@ -449,7 +473,9 @@ function selectUnit(unitId) {
 
 function closePlanning() {
   selectedUnitId = null;
-  planPanel.classList.add('hidden');
+  planPanel.classList.add('plan-panel-invisible');
+  planUnitLabel.textContent = ' ';
+  renderPlanTable();
   clearHighlights();
   clearPath();
 }
