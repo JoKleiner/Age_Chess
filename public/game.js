@@ -135,13 +135,11 @@ function createChipElement(role, typeKey, chipIndex) {
   return el;
 }
 
+// Positionierung einheitlich über "transform" (statt x/y-Attribute beim
+// <image>-Tag), damit die CSS-Transition auf .unit für beide Chip-Arten
+// gleichermaßen greift und Bewegungen weich statt sprunghaft wirken.
 function positionChipElement(el, x, y) {
-  if (el.tagName === 'image') {
-    el.setAttribute('x', x - UNIT_CHIP_SIZE / 2);
-    el.setAttribute('y', y - UNIT_CHIP_SIZE / 2);
-  } else {
-    el.setAttribute('transform', `translate(${x - UNIT_CHIP_SIZE / 2}, ${y - UNIT_CHIP_SIZE / 2})`);
-  }
+  el.setAttribute('transform', `translate(${x - UNIT_CHIP_SIZE / 2}, ${y - UNIT_CHIP_SIZE / 2})`);
 }
 
 // ---------- Raum beitreten ----------
@@ -154,6 +152,12 @@ joinButton.addEventListener('click', () => {
   }
   myRoomId = roomId;
   socket.emit('joinRoom', roomId);
+});
+
+roomInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    joinButton.click();
+  }
 });
 
 socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits }) => {
@@ -654,6 +658,15 @@ editButton.addEventListener('click', () => {
 
 // ---------- Gleichzeitige Ausführung (bis zu 4 Takte, alle Einheiten) ----------
 
+// Zeit, die die Takt-Anzeige sichtbar ist, BEVOR sich die Einheiten für
+// diesen Takt bewegen (auch beim allerersten Takt) - sonst würde der erste
+// Zug sofort beim Bestätigen ausgeführt, ohne dass man die Anzeige noch
+// wahrnimmt. TICK_MOVE_DURATION muss zur CSS-transition-duration von .unit
+// passen, damit die Bewegung bis zum nächsten Takt sichtbar abgeschlossen ist.
+const TICK_LABEL_DELAY = 500;
+const TICK_MOVE_DURATION = 700;
+const TICK_PAUSE_AFTER = 400;
+
 function animateRound(stepsByUnit) {
   const totalTicks = Math.max(0, ...Object.values(stepsByUnit).map(s => s.length));
   let tick = 0;
@@ -673,15 +686,17 @@ function animateRound(stepsByUnit) {
 
     tickDisplay.textContent = `Takt ${tick + 1} von ${totalTicks}`;
 
-    Object.entries(stepsByUnit).forEach(([unitId, steps]) => {
-      if (steps[tick]) {
-        positions[unitId] = steps[tick];
-        renderUnit(unitId);
-      }
-    });
+    setTimeout(() => {
+      Object.entries(stepsByUnit).forEach(([unitId, steps]) => {
+        if (steps[tick]) {
+          positions[unitId] = steps[tick];
+          renderUnit(unitId);
+        }
+      });
 
-    tick++;
-    setTimeout(nextTick, 800);
+      tick++;
+      setTimeout(nextTick, TICK_MOVE_DURATION + TICK_PAUSE_AFTER);
+    }, TICK_LABEL_DELAY);
   }
 
   nextTick();
