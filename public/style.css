@@ -65,11 +65,17 @@ body {
 .hex.selectable { fill: #a8d5a8; }
 .hex.own-zone   { stroke: #333; stroke-width: 2; }
 .hex:hover      { fill: #ffe08a; }
+.hex.blocked-cell { fill: #ffcc00; stroke: #b38600; stroke-width: 3; }
+.hex.combat-cell  { fill: #e05a5a; stroke: #8a1f1f; stroke-width: 3; }
 
 .unit {
   pointer-events: auto;
   cursor: pointer;
-  transition: transform 0.7s ease;
+  transition: transform 0.7s ease, opacity 0.7s ease;
+}
+.unit.defeated {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .chip-circle {
@@ -85,6 +91,33 @@ body {
   dominant-baseline: central;
   pointer-events: none;
 }
+
+/* HP-Balken: zeigt direkt oberhalb eines beschaedigten Bataillon-Chips ein
+   Segment pro Einheit (UnitTypes.BATTALION_SIZE Segmente) - bleibt bei
+   vollem HP-Stand ausgeblendet (.hidden). Lebende Segmente wechseln die
+   Farbe mit dem HP-Anteil, tote Segmente bleiben dunkel/leer. */
+.hp-bar {
+  pointer-events: none;
+  /* transform-Dauer muss zu .unit passen (siehe setMoveDuration in game.js),
+     sonst laeuft der Balken dem Chip beim Bewegen voraus statt mitzuziehen. */
+  transition: transform 0.7s ease, opacity 0.5s ease;
+}
+.hp-bar.defeated {
+  opacity: 0;
+}
+.hp-bar-frame {
+  fill: #000;
+  fill-opacity: 0.35;
+  stroke-width: 0.75;
+}
+.hp-bar-frame-blue { stroke: #3366cc; }
+.hp-bar-frame-red  { stroke: #cc3333; }
+.hp-bar-segment {
+  fill: #4caf50;
+  stroke: #111;
+  stroke-width: 0.5;
+}
+.hp-bar-segment.hp-bar-dead { fill: #333; opacity: 0.5; }
 
 .ghost-blue { fill: #aac2f2; stroke: #3366cc; stroke-width: 2; pointer-events: none; }
 .ghost-red  { fill: #f2aaaa; stroke: #cc3333; stroke-width: 2; pointer-events: none; }
@@ -156,6 +189,12 @@ body {
   background: #ffe08a;
   border: 1px solid #e0b34d;
   border-radius: 8px;
+}
+/* Bleibt (wie .plan-panel-invisible) permanent im Layout, nur unsichtbar,
+   damit das Spielfeld beim Ein-/Ausblenden zwischen den Runden nicht die
+   Groesse aendert. */
+.tick-display-invisible {
+  visibility: hidden;
 }
 
 #boardArea {
