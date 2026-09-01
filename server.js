@@ -217,24 +217,45 @@ function resolveRound(room, combinedPlan) {
   // selben Takt von mehreren gegnerischen Bataillonen (attackerIds) angezogen.
   // Der Verteidiger teilt seine lebenden Einheiten durch die Anzahl Angreifer
   // (aufgerundet, min. 1) und greift damit JEDEN Angreifer an; jeder Angreifer
-  // teilt seinen vollen Schaden aus. Alles gleichzeitig aus den Vor-Kampf-
-  // Werten. Sinkt der Verteidiger auf 0 HP, rueckt der Angreifer mit dem
-  // meisten an ihm verursachten Schaden auf das Feld nach.
-  const resolveDefenseCombat = (defenderId, attackerIds) => {
+  // teilt seinen vollen Schaden aus. Sinkt der Verteidiger auf 0 HP, rueckt der
+  // Angreifer mit dem meisten an ihm verursachten Schaden auf das Feld nach.
+  //
+  // interceptorsByAttacker (optional): { angreiferId: [verbuendeteDesVerteidigers, ...] }
+  // - Verbuendete des Verteidigers, die im selben Takt auf das URSPRUNGSFELD
+  //   eines Angreifers ziehen und diesen damit angreifen. Sie teilen ihren
+  //   vollen Schaden ZUSAETZLICH zum Verteidiger-Anteil auf diesen einen
+  //   Angreifer aus und bekommen KEINEN Gegenschaden (der Angreifer verbraucht
+  //   seinen Schlag am Verteidiger). Alles gleichzeitig aus den Vor-Kampf-
+  //   Werten - erst DANACH wird entschieden, wer wohin nachrueckt: Stirbt der
+  //   Angreifer, rueckt der staerkste ueberlebende Interceptor auf dessen frei
+  //   gewordenes Ursprungsfeld nach; ueberlebt der Angreifer (auch wenn er
+  //   selbst siegreich vorrueckt), bleibt sein Feld leer und die Interceptor
+  //   haben nur gekaempft (Rest-Zug verwirkt).
+  const resolveDefenseCombat = (defenderId, attackerIds, interceptorsByAttacker = {}) => {
     const dType = unitsById[defenderId].typeKey;
     const dCell = { ...livePositions[defenderId] };
     const share = attackShare(livingOf(defenderId), attackerIds.length);
 
+    const interceptorsOf = (aid) => interceptorsByAttacker[aid] || [];
+    const allInterceptors = [];
+    attackerIds.forEach(aid => interceptorsOf(aid).forEach(iid => allInterceptors.push(iid)));
+
     const dmgToDefender = {};
     const dmgToAttacker = {};
+    const dmgByInterceptor = {}; // interceptorId -> Schaden am angegriffenen Angreifer
     attackerIds.forEach(id => {
       dmgToDefender[id] = livingOf(id) * UnitTypes.damageOf(unitsById[id].typeKey, dType);
       dmgToAttacker[id] = share * UnitTypes.damageOf(dType, unitsById[id].typeKey);
+      interceptorsOf(id).forEach(iid => {
+        dmgByInterceptor[iid] = livingOf(iid) * UnitTypes.damageOf(unitsById[iid].typeKey, unitsById[id].typeKey);
+        dmgToAttacker[id] += dmgByInterceptor[iid];
+      });
     });
 
     const totalToDefender = attackerIds.reduce((s, id) => s + dmgToDefender[id], 0);
     hp[defenderId] = Math.max(0, hp[defenderId] - totalToDefender);
     attackerIds.forEach(id => { hp[id] = Math.max(0, hp[id] - dmgToAttacker[id]); });
+    // Interceptor bekommen keinen Gegenschaden.
 
     const defenderDefeated = hp[defenderId] <= 0;
     const moverId = defenderDefeated
@@ -246,17 +267,60 @@ function resolveRound(room, combinedPlan) {
       desired[id] = id === moverId ? { ...dCell } : { ...livePositions[id] };
     });
 
-    markFought([defenderId, ...attackerIds]);
+    // Interceptor: nur wenn "ihr" Angreifer faellt, rueckt der staerkste
+    // ueberlebende von ihnen auf dessen Ursprungsfeld nach - sonst bleiben sie
+    // stehen.
+    const interceptorMover = {}; // angreiferId -> nachrueckender interceptorId
+    attackerIds.forEach(aid => {
+      const list = interceptorsOf(aid);
+      if (!list.length) return;
+      const advancer = hp[aid] <= 0
+        ? pickAdvancer(list.filter(id => hp[id] > 0), dmgByInterceptor, unitsById)
+        : null;
+      const originCell = { ...livePositions[aid] };
+      list.forEach(id => {
+        desired[id] = id === advancer ? { ...originCell } : { ...livePositions[id] };
+      });
+      if (advancer) interceptorMover[aid] = advancer;
+    });
+
+    markFought([defenderId, ...attackerIds, ...allInterceptors]);
     if (defenderDefeated) deadUnits.add(defenderId);
     attackerIds.forEach(id => { if (hp[id] <= 0) deadUnits.add(id); });
 
-    const part = {
+    // Ereignis fuer das Verteidiger-Feld. Angreifer MIT Interceptor werden
+    // hier noch als nicht besiegt gefuehrt - ihr Ausscheiden zeigt das
+    // jeweilige Interceptor-Ereignis unten.
+    const mainPart = {
       [defenderId]: { from: dCell, attempt: dCell, hpAfter: hp[defenderId], defeated: defenderDefeated }
     };
     attackerIds.forEach(id => {
-      part[id] = { from: { ...livePositions[id] }, attempt: dCell, hpAfter: hp[id], defeated: hp[id] <= 0 };
+      const hasIntercept = interceptorsOf(id).length > 0;
+      mainPart[id] = {
+        from: { ...livePositions[id] }, attempt: dCell, hpAfter: hp[id],
+        defeated: hasIntercept ? false : hp[id] <= 0
+      };
     });
-    buildCombatEvent([dCell], [defenderId, ...attackerIds], part, moverId);
+    buildCombatEvent([dCell], [defenderId, ...attackerIds], mainPart, moverId);
+
+    // Je ein Ereignis pro Angreifer-Ursprungsfeld mit Interceptor. Uebersprungen
+    // wird nur der Fall, dass der Angreifer ueberlebt UND selbst siegreich
+    // vorrueckt (dann wuerde die Animation ihn kurz zurueckschnappen lassen) -
+    // sein hpAfter im Hauptereignis enthaelt den Interceptor-Schaden ohnehin.
+    attackerIds.forEach(aid => {
+      const list = interceptorsOf(aid);
+      if (!list.length) return;
+      const advancer = interceptorMover[aid] || null;
+      if (hp[aid] > 0 && !advancer && aid === moverId) return;
+      const originCell = { ...livePositions[aid] };
+      const part = {
+        [aid]: { from: originCell, attempt: dCell, hpAfter: hp[aid], defeated: hp[aid] <= 0 }
+      };
+      list.forEach(id => {
+        part[id] = { from: { ...livePositions[id] }, attempt: originCell, hpAfter: hp[id], defeated: false };
+      });
+      buildCombatEvent([originCell], [aid, ...list], part, advancer);
+    });
   };
 
   // Fall 3: leeres Feld, mehrere Bataillone BEIDER Seiten ziehen im selben
@@ -269,7 +333,16 @@ function resolveRound(room, combinedPlan) {
   // Gesamtschaden das Feld; unter ihren Ueberlebenden rueckt das Bataillon mit
   // dem meisten selbst ausgeteilten Schaden nach (Gleichstand: hoeherer
   // speedRank, dann kleinerer chipIndex; ueberlebt keines, bleibt es leer).
-  const resolveClashCombat = (moverIds) => {
+  //
+  // interceptorsByMover (optional): { moverId: [gegnerBataillone, ...] } - wie
+  // bei resolveDefenseCombat. Bataillone, die im selben Takt auf das
+  // Ursprungsfeld eines Clash-Teilnehmers ziehen, greifen diesen dort an
+  // (voller Schaden zusaetzlich, kein Gegenschaden). KEIN Fliehen: das trifft
+  // den Teilnehmer auch dann, wenn er den Clash gewinnt und auf das leere Feld
+  // vorrueckt. Der Interceptor-Schaden zaehlt NICHT zum Seiten-Gesamtschaden
+  // fuers Feld. Stirbt der Teilnehmer, rueckt der staerkste ueberlebende
+  // Interceptor auf dessen Ursprungsfeld nach; ueberlebt er, bleibt es leer.
+  const resolveClashCombat = (moverIds, interceptorsByMover = {}) => {
     const target = { ...desired[moverIds[0]] };
     const blue = moverIds.filter(id => unitsById[id].role === 'blue');
     const red = moverIds.filter(id => unitsById[id].role === 'red');
@@ -289,6 +362,18 @@ function resolveRound(room, combinedPlan) {
     blue.forEach(b => red.forEach(r => applyPair(b, r)));
     red.forEach(r => blue.forEach(b => applyPair(r, b)));
 
+    // Interceptor-Schaden auf "ihren" Clash-Teilnehmer drauf (kein Gegenschaden).
+    const interceptorsOfMover = (mid) => interceptorsByMover[mid] || [];
+    const allInterceptors = [];
+    const dmgByInterceptor = {};
+    moverIds.forEach(mid => {
+      interceptorsOfMover(mid).forEach(iid => {
+        allInterceptors.push(iid);
+        dmgByInterceptor[iid] = livingOf(iid) * UnitTypes.damageOf(unitsById[iid].typeKey, unitsById[mid].typeKey);
+        incoming[mid] += dmgByInterceptor[iid];
+      });
+    });
+
     moverIds.forEach(id => { hp[id] = Math.max(0, hp[id] - incoming[id]); });
 
     const blueTotal = blue.reduce((s, id) => s + dealt[id], 0);
@@ -302,128 +387,158 @@ function resolveRound(room, combinedPlan) {
       desired[id] = id === moverId ? { ...target } : { ...livePositions[id] };
       if (hp[id] <= 0) deadUnits.add(id);
     });
-    markFought(moverIds);
 
-    const part = {};
+    // Interceptor ruecken nur nach, wenn "ihr" Clash-Teilnehmer faellt.
+    const interceptorMover = {};
+    moverIds.forEach(mid => {
+      const list = interceptorsOfMover(mid);
+      if (!list.length) return;
+      const advancer = hp[mid] <= 0
+        ? pickAdvancer(list.filter(id => hp[id] > 0), dmgByInterceptor, unitsById)
+        : null;
+      const originCell = { ...livePositions[mid] };
+      list.forEach(id => {
+        desired[id] = id === advancer ? { ...originCell } : { ...livePositions[id] };
+      });
+      if (advancer) interceptorMover[mid] = advancer;
+    });
+
+    markFought([...moverIds, ...allInterceptors]);
+
+    const mainPart = {};
     moverIds.forEach(id => {
-      part[id] = { from: { ...livePositions[id] }, attempt: target, hpAfter: hp[id], defeated: hp[id] <= 0 };
+      const hasIntercept = interceptorsOfMover(id).length > 0;
+      mainPart[id] = {
+        from: { ...livePositions[id] }, attempt: target, hpAfter: hp[id],
+        defeated: hasIntercept ? false : hp[id] <= 0
+      };
     });
-    buildCombatEvent([target], moverIds, part, moverId);
-  };
+    buildCombatEvent([target], moverIds, mainPart, moverId);
 
-  // Fall 2c: chargerId steht auf seinem Feld und zieht auf ein Feld, auf dem
-  // ein stehendes gegnerisches Bataillon (enemyId) steht; GLEICHZEITIG ziehen
-  // gegnerische Bataillone (interceptorIds) auf chargerIds Ursprungsfeld.
-  //  - charger teilt enemy seinen VOLLEN Schaden zu, enemy schlaegt gleich-
-  //    zeitig zurueck.
-  //  - Stirbt enemy: charger rueckt (falls selbst noch am Leben) auf enemys
-  //    Feld nach und entkommt dem Kampf auf seinem alten Feld komplett; die
-  //    interceptorIds loesen sich ueber die normalen Regeln auf.
-  //  - Ueberlebt enemy: charger bleibt auf seinem Feld. Die interceptorIds
-  //    greifen ihn dort an und bekommen KEINEN Gegenschaden (charger hat
-  //    seinen Schaden schon an enemy verbraucht). Stirbt charger dadurch,
-  //    rueckt der interceptor mit dem meisten an ihm verursachten Schaden nach.
-  const resolveChargeCombat = (chargerId, enemyId, interceptorIds) => {
-    const cType = unitsById[chargerId].typeKey;
-    const eType = unitsById[enemyId].typeKey;
-    const chargerCell = { ...livePositions[chargerId] };
-    const enemyCell = { ...livePositions[enemyId] };
-
-    const dmgChargerToEnemy = livingOf(chargerId) * UnitTypes.damageOf(cType, eType);
-    const dmgEnemyToCharger = livingOf(enemyId) * UnitTypes.damageOf(eType, cType);
-
-    hp[enemyId] = Math.max(0, hp[enemyId] - dmgChargerToEnemy);
-    const hpChargerAfterEnemy = Math.max(0, hp[chargerId] - dmgEnemyToCharger);
-    const enemyDefeated = hp[enemyId] <= 0;
-
-    markFought([chargerId, enemyId]);
-
-    if (enemyDefeated) {
-      deadUnits.add(enemyId);
-      hp[chargerId] = hpChargerAfterEnemy;
-      const chargerDefeated = hp[chargerId] <= 0;
-      if (chargerDefeated) deadUnits.add(chargerId);
-      const moverId = chargerDefeated ? null : chargerId;
-      desired[chargerId] = chargerDefeated ? { ...chargerCell } : { ...enemyCell };
-      desired[enemyId] = { ...enemyCell };
-      buildCombatEvent([enemyCell], [chargerId, enemyId], {
-        [chargerId]: { from: chargerCell, attempt: enemyCell, hpAfter: hp[chargerId], defeated: chargerDefeated },
-        [enemyId]: { from: enemyCell, attempt: enemyCell, hpAfter: hp[enemyId], defeated: true }
-      }, moverId);
-      return;
-    }
-
-    // enemy ueberlebt -> charger bleibt auf seinem Feld stehen.
-    desired[chargerId] = { ...chargerCell };
-    desired[enemyId] = { ...enemyCell };
-
-    // Stage-A-Ereignis (charger vs enemy): hpAfter des chargers ist hier nur
-    // der Zwischenstand nach enemys Gegenschlag.
-    buildCombatEvent([enemyCell], [chargerId, enemyId], {
-      [chargerId]: { from: chargerCell, attempt: enemyCell, hpAfter: hpChargerAfterEnemy, defeated: false },
-      [enemyId]: { from: enemyCell, attempt: enemyCell, hpAfter: hp[enemyId], defeated: false }
-    }, null);
-
-    if (!interceptorIds.length) {
-      hp[chargerId] = hpChargerAfterEnemy;
-      if (hp[chargerId] <= 0) deadUnits.add(chargerId);
-      return;
-    }
-
-    // Stage B: die interceptorIds greifen den charger auf seinem Feld an, er
-    // teilt keinen Gegenschaden mehr aus.
-    const dmgToCharger = {};
-    interceptorIds.forEach(id => {
-      dmgToCharger[id] = livingOf(id) * UnitTypes.damageOf(unitsById[id].typeKey, cType);
+    // Je ein Ereignis pro Clash-Teilnehmer-Ursprungsfeld mit Interceptor -
+    // uebersprungen nur, wenn der Teilnehmer ueberlebt UND selbst vorrueckt.
+    moverIds.forEach(mid => {
+      const list = interceptorsOfMover(mid);
+      if (!list.length) return;
+      const advancer = interceptorMover[mid] || null;
+      if (hp[mid] > 0 && !advancer && mid === moverId) return;
+      const originCell = { ...livePositions[mid] };
+      const part = {
+        [mid]: { from: originCell, attempt: target, hpAfter: hp[mid], defeated: hp[mid] <= 0 }
+      };
+      list.forEach(id => {
+        part[id] = { from: { ...livePositions[id] }, attempt: originCell, hpAfter: hp[id], defeated: false };
+      });
+      buildCombatEvent([originCell], [mid, ...list], part, advancer);
     });
-    const totalToCharger = interceptorIds.reduce((s, id) => s + dmgToCharger[id], 0);
-    hp[chargerId] = Math.max(0, hpChargerAfterEnemy - totalToCharger);
-    const chargerDefeated = hp[chargerId] <= 0;
-    if (chargerDefeated) deadUnits.add(chargerId);
-
-    const moverId = chargerDefeated
-      ? pickAdvancer(interceptorIds.filter(id => hp[id] > 0), dmgToCharger, unitsById)
-      : null;
-    interceptorIds.forEach(id => {
-      desired[id] = id === moverId ? { ...chargerCell } : { ...livePositions[id] };
-    });
-    markFought(interceptorIds);
-
-    const part = {
-      [chargerId]: { from: chargerCell, attempt: chargerCell, hpAfter: hp[chargerId], defeated: chargerDefeated }
-    };
-    interceptorIds.forEach(id => {
-      part[id] = { from: { ...livePositions[id] }, attempt: chargerCell, hpAfter: hp[id], defeated: hp[id] <= 0 };
-    });
-    buildCombatEvent([chargerCell], [chargerId, ...interceptorIds], part, moverId);
   };
 
   // Zwei gegnerische Bataillone wollen im selben Takt die Plaetze tauschen
-  // (aneinander vorbeilaufen). Standard: beide bleiben stehen; nur wenn GENAU
-  // eines besiegt wird, rueckt das ueberlebende auf das frei gewordene Feld.
-  const resolveSwapCombat = (id1, id2) => {
+  // (aneinander vorbeilaufen). Beide teilen sich gegenseitig ihren VOLLEN
+  // Schaden zu. Standard: beide bleiben stehen; nur wenn GENAU eines besiegt
+  // wird, rueckt das ueberlebende auf das frei gewordene Feld.
+  //
+  // interceptorsById (optional): { id1: [...], id2: [...] } - gegnerische
+  // Bataillone, die im selben Takt auf das Ursprungsfeld von id1 bzw. id2
+  // ziehen und dieses dort ZUSAETZLICH angreifen (voller Schaden, KEIN
+  // Gegenschaden - der Tauschende verbraucht seinen Schlag am Tausch-Gegner).
+  // Alles gleichzeitig aus den Vor-Kampf-Werten; erst DANACH wird nachgerueckt.
+  // Ein Ursprungsfeld wird nur frei, wenn seine Figur faellt; es geht dann an
+  // den Anruecker mit dem meisten an dieser Figur verursachten Schaden (erst
+  // bei Gleichstand: hoeherer speedRank, dann kleinerer chipIndex). Tausch-
+  // Partner und Interceptor der gefallenen Figur sind dabei gleichrangig - der
+  // Tausch-Partner hat KEINEN Vorrang.
+  const resolveSwapCombat = (id1, id2, interceptorsById = {}) => {
     const t1 = unitsById[id1].typeKey;
     const t2 = unitsById[id2].typeKey;
     const cell1 = { ...livePositions[id1] };
     const cell2 = { ...livePositions[id2] };
+
+    const interceptorsOfSwapper = (id) => interceptorsById[id] || [];
+    const allInterceptors = [...interceptorsOfSwapper(id1), ...interceptorsOfSwapper(id2)];
+
     const dmg1to2 = livingOf(id1) * UnitTypes.damageOf(t1, t2);
     const dmg2to1 = livingOf(id2) * UnitTypes.damageOf(t2, t1);
-    hp[id1] = Math.max(0, hp[id1] - dmg2to1);
-    hp[id2] = Math.max(0, hp[id2] - dmg1to2);
+
+    const dmgByInterceptor = {}; // interceptorId -> Schaden am angegriffenen Tauschenden
+    const interceptDmgTo = { [id1]: 0, [id2]: 0 };
+    [id1, id2].forEach(mid => {
+      interceptorsOfSwapper(mid).forEach(iid => {
+        dmgByInterceptor[iid] = livingOf(iid) * UnitTypes.damageOf(unitsById[iid].typeKey, unitsById[mid].typeKey);
+        interceptDmgTo[mid] += dmgByInterceptor[iid];
+      });
+    });
+
+    hp[id1] = Math.max(0, hp[id1] - dmg2to1 - interceptDmgTo[id1]);
+    hp[id2] = Math.max(0, hp[id2] - dmg1to2 - interceptDmgTo[id2]);
+    // Interceptor bekommen keinen Gegenschaden.
     const def1 = hp[id1] <= 0;
     const def2 = hp[id2] <= 0;
-    let moverId = null;
-    if (def1 && !def2) moverId = id2;
-    else if (def2 && !def1) moverId = id1;
-    desired[id1] = moverId === id1 ? { ...cell2 } : { ...cell1 };
-    desired[id2] = moverId === id2 ? { ...cell1 } : { ...cell2 };
-    markFought([id1, id2]);
+
     if (def1) deadUnits.add(id1);
     if (def2) deadUnits.add(id2);
-    buildCombatEvent([cell1, cell2], [id1, id2], {
-      [id1]: { from: cell1, attempt: cell2, hpAfter: hp[id1], defeated: def1 },
-      [id2]: { from: cell2, attempt: cell1, hpAfter: hp[id2], defeated: def2 }
-    }, moverId);
+
+    // Nachruecken. Ein Ursprungsfeld wird NUR frei, wenn seine Figur faellt.
+    // Es geht dann an den Anruecker mit dem meisten an dieser gefallenen Figur
+    // verursachten Schaden; erst bei Gleichstand entscheidet der hoehere
+    // speedRank ("schneller"), dann der kleinere chipIndex. Gleichrangige
+    // Kandidaten sind der ueberlebende Tausch-Partner UND die ueberlebenden
+    // Interceptor dieser Figur - der Tausch-Partner hat KEINEN Vorrang.
+    const advanceInto = {}; // unitId -> Zielzelle
+    [
+      { deadId: id1, otherId: id2, originCell: cell1, swapDmg: dmg2to1 },
+      { deadId: id2, otherId: id1, originCell: cell2, swapDmg: dmg1to2 }
+    ].forEach(({ deadId, otherId, originCell, swapDmg }) => {
+      if (hp[deadId] > 0) return; // lebt noch -> Feld bleibt besetzt
+      const dmgToDead = {};
+      const contenders = [];
+      if (hp[otherId] > 0) { contenders.push(otherId); dmgToDead[otherId] = swapDmg; }
+      interceptorsOfSwapper(deadId).forEach(iid => {
+        if (hp[iid] > 0) { contenders.push(iid); dmgToDead[iid] = dmgByInterceptor[iid]; }
+      });
+      const winner = pickAdvancer(contenders, dmgToDead, unitsById);
+      if (winner) advanceInto[winner] = { ...originCell };
+    });
+
+    const finalCell = (id, home) => advanceInto[id] ? { ...advanceInto[id] } : { ...home };
+    desired[id1] = finalCell(id1, cell1);
+    desired[id2] = finalCell(id2, cell2);
+    allInterceptors.forEach(iid => { desired[iid] = finalCell(iid, livePositions[iid]); });
+
+    markFought([id1, id2, ...allInterceptors]);
+
+    // Rueckt einer der beiden Tauschenden (nach Schaden) auf das gegnerische
+    // Tausch-Feld vor, ist er der "moverId" der Haupt-Animation.
+    const swapMover = advanceInto[id1] ? id1 : advanceInto[id2] ? id2 : null;
+
+    // Hauptereignis (Tausch-Feld <-> Tausch-Feld). Tauschende MIT Interceptor
+    // werden hier noch als nicht besiegt gefuehrt - ihr Ausscheiden zeigt das
+    // jeweilige Interceptor-Ereignis unten.
+    const mainPart = {};
+    [[id1, cell1, cell2], [id2, cell2, cell1]].forEach(([id, from, attempt]) => {
+      const hasIntercept = interceptorsOfSwapper(id).length > 0;
+      mainPart[id] = {
+        from, attempt, hpAfter: hp[id],
+        defeated: hasIntercept ? false : hp[id] <= 0
+      };
+    });
+    buildCombatEvent([cell1, cell2], [id1, id2], mainPart, swapMover);
+
+    // Je ein Ereignis pro Ursprungsfeld mit Interceptor - uebersprungen nur,
+    // wenn der Tauschende ueberlebt UND selbst siegreich vorrueckt.
+    [[id1, cell1, cell2], [id2, cell2, cell1]].forEach(([mid, originCell, attempt]) => {
+      const list = interceptorsOfSwapper(mid);
+      if (!list.length) return;
+      const advancer = list.find(id => advanceInto[id]) || null;
+      if (hp[mid] > 0 && !advancer && mid === swapMover) return;
+      const part = {
+        [mid]: { from: originCell, attempt, hpAfter: hp[mid], defeated: hp[mid] <= 0 }
+      };
+      list.forEach(id => {
+        part[id] = { from: { ...livePositions[id] }, attempt: originCell, hpAfter: hp[id], defeated: false };
+      });
+      buildCombatEvent([originCell], [mid, ...list], part, advancer);
+    });
   };
 
   for (let tick = 0; tick < totalTicks; tick++) {
@@ -473,6 +588,15 @@ function resolveRound(room, combinedPlan) {
             ? posKeyOf(livePositions[u.id])
             : posKeyOf(desired[u.id]);
           if (at === key) roles.add(u.role);
+          // Ein noch handlungsfaehiges gegnerisches Bataillon, das AKTUELL auf
+          // `key` steht, macht das Feld umkaempft - auch wenn es diesen Takt
+          // wegzieht: sein Wegzug kann in einem Kampf (Platztausch/Interceptor)
+          // steckenbleiben. Sonst wuerde die gleichseitige "nur der Schnellste
+          // rueckt nach"-Regel unten einen Angreifer/Interceptor zurueck-
+          // schicken, bevor der Kampf ueberhaupt aufgeloest ist.
+          if (!blockedUnits.has(u.id) && posKeyOf(livePositions[u.id]) === key) {
+            roles.add(u.role);
+          }
         });
         return roles.size >= 2;
       };
@@ -547,7 +671,26 @@ function resolveRound(room, combinedPlan) {
         !combatResolvedThisTick.has(id) && !blockedUnits.has(id) && !isStationary(id)
       );
 
-      // (1) Platztausch zweier gegnerischer Bataillone.
+      // "Interceptor" von unitId: gegnerische Bataillone, die im selben Takt
+      // auf DAS URSPRUNGSFELD von unitId ziehen und es damit dort angreifen,
+      // waehrend unitId selbst in einen Kampf verwickelt ist. Kein Fliehen:
+      // dieser Angriff trifft unitId immer (auch wenn unitId seinen eigenen
+      // Kampf gewinnt und wegzieht). `exclude` haelt die schon als
+      // Kern-Kaempfer erfassten Bataillone heraus.
+      const interceptorsOf = (unitId, exclude) => {
+        const originKey = posKeyOf(livePositions[unitId]);
+        return aliveIds.filter(id =>
+          id !== unitId && !exclude.has(id) && areEnemies(id, unitId) &&
+          !combatResolvedThisTick.has(id) && !blockedUnits.has(id) &&
+          !isStationary(id) && posKeyOf(desired[id]) === originKey
+        );
+      };
+
+      // (1) Platztausch zweier gegnerischer Bataillone - inkl. dem Sonderfall,
+      //     dass gleichzeitig Verbuendete auf die Ursprungsfelder der beiden
+      //     Tauschenden ziehen und sie dort zusaetzlich angreifen (Interceptor,
+      //     wie bei Fall 1 / Fall 3). Der Kampf laeuft komplett aus den
+      //     Vor-Kampf-Werten; erst danach wird nachgerueckt.
       const swapPool = combatMovers();
       for (let i = 0; i < swapPool.length && !combatDone; i++) {
         for (let j = i + 1; j < swapPool.length; j++) {
@@ -555,7 +698,13 @@ function resolveRound(room, combinedPlan) {
           const b = swapPool[j];
           if (areEnemies(a, b) &&
               samePos(desired[a], livePositions[b]) && samePos(desired[b], livePositions[a])) {
-            resolveSwapCombat(a, b);
+            const exclude = new Set([a, b]);
+            const interceptorsById = {};
+            [a, b].forEach(id => {
+              const list = interceptorsOf(id, exclude);
+              if (list.length) interceptorsById[id] = list;
+            });
+            resolveSwapCombat(a, b, interceptorsById);
             combatDone = true;
             changed = true;
             break;
@@ -563,33 +712,15 @@ function resolveRound(room, combinedPlan) {
         }
       }
 
-      // (2) Fall 2c: ein Bataillon rennt in ein stehendes gegnerisches
-      //     Bataillon, waehrend gegnerische Bataillone gleichzeitig auf sein
-      //     Ursprungsfeld ziehen.
-      if (!combatDone) {
-        for (const chargerId of combatMovers()) {
-          const targetKey = posKeyOf(desired[chargerId]);
-          const enemyId = aliveIds.find(id =>
-            id !== chargerId && areEnemies(id, chargerId) && !combatResolvedThisTick.has(id) &&
-            isStationary(id) && posKeyOf(livePositions[id]) === targetKey
-          );
-          if (!enemyId) continue;
-          const originKey = posKeyOf(livePositions[chargerId]);
-          const interceptorIds = aliveIds.filter(id =>
-            id !== chargerId && areEnemies(id, chargerId) && !combatResolvedThisTick.has(id) &&
-            !blockedUnits.has(id) && !isStationary(id) && posKeyOf(desired[id]) === originKey
-          );
-          if (!interceptorIds.length) continue; // reiner Angriff auf Stehenden -> (3)
-          resolveChargeCombat(chargerId, enemyId, interceptorIds);
-          combatDone = true;
-          changed = true;
-          break;
-        }
-      }
-
-      // (3) Umkaempftes Zielfeld: Fall 1 (ein stehendes Bataillon + mehrere
-      //     gegnerische Angreifer, deckt auch den 1-gegen-1-Angriff auf einen
-      //     Stehenden ab) oder Fall 3 (leeres Feld, Bataillone beider Seiten).
+      // (2) Umkaempftes Zielfeld: Fall 1 (ein stehendes Bataillon + ein oder
+      //     mehrere gegnerische Angreifer - inkl. dem Sonderfall, dass ein
+      //     Verbuendeter des Verteidigers gleichzeitig auf das Ursprungsfeld
+      //     eines Angreifers zieht und diesen angreift) oder Fall 3 (leeres
+      //     Feld, Bataillone beider Seiten). WICHTIG: Der Kampf wird KOMPLETT
+      //     ausgetragen (alle Angreifer gegen den Stehenden, plus die
+      //     Interceptor gegen ihre Angreifer, alles gleichzeitig aus den
+      //     Vor-Kampf-Werten) und ERST DANACH entschieden, wer auf welches
+      //     Feld nachrueckt.
       if (!combatDone) {
         const byTarget = {};
         combatMovers().forEach(id => {
@@ -603,15 +734,68 @@ function resolveRound(room, combinedPlan) {
           if (occupantId) {
             const attackers = ids.filter(id => areEnemies(id, occupantId));
             if (!attackers.length) continue;
-            resolveDefenseCombat(occupantId, attackers);
+            const exclude = new Set([occupantId, ...attackers]);
+            const interceptorsByAttacker = {};
+            attackers.forEach(aid => {
+              const list = interceptorsOf(aid, exclude);
+              if (list.length) interceptorsByAttacker[aid] = list;
+            });
+            resolveDefenseCombat(occupantId, attackers, interceptorsByAttacker);
           } else {
             if (new Set(ids.map(id => unitsById[id].role)).size < 2) continue;
-            resolveClashCombat(ids);
+            const exclude = new Set(ids);
+            const interceptorsByMover = {};
+            ids.forEach(mid => {
+              const list = interceptorsOf(mid, exclude);
+              if (list.length) interceptorsByMover[mid] = list;
+            });
+            resolveClashCombat(ids, interceptorsByMover);
           }
           combatDone = true;
           changed = true;
           break;
         }
+      }
+
+      // (3) Sicherheitsnetz gegen Doppelbelegung. Wurde in diesem Takt eine
+      // Bewegung durch eine Blockade oder einen Kampf zurueckgenommen, kann
+      // eine Einheit auf ihr Feld zurueckgefallen sein, auf das gleichzeitig
+      // eine andere - bereits freigegebene - Einheit ziehen wollte (das
+      // umkaempfte Feld galt zum Pruefzeitpunkt als "wird geraeumt"). Erst
+      // wenn diese Iteration keinen Kampf mehr ausgeloest hat, steht `desired`
+      // fest genug: pro Feld darf hoechstens eine Einheit landen. Es bleibt,
+      // wer schon dort steht, sonst die schnellste (bzw. kleinster Index,
+      // siehe pickWinner); alle anderen verlieren ihren Rest-Zug. Laeuft in
+      // der Fixpunkt-Schleife mit, damit Ketten sauber auslaufen.
+      if (!combatDone) {
+        const byCell = {};
+        aliveIds.forEach(id => {
+          const key = posKeyOf(desired[id]);
+          (byCell[key] = byCell[key] || []).push(id);
+        });
+        Object.values(byCell).forEach(ids => {
+          if (ids.length <= 1) return;
+          // Wer bleibt: zuerst eine Einheit, die auf ihrem eigenen Feld steht
+          // (nie gezogen oder nach einem Kampf/einer Blockade dorthin zurueck-
+          // gefallen) - eine bereits besetzte Zelle darf niemand betreten;
+          // sonst eine Einheit, die diesen Takt schon gekaempft hat / geblockt
+          // ist und gerade nachrueckt (Ziel steht fest, z.B. Platztausch-
+          // Sieger); sonst die schnellste (bzw. kleinster Index, pickWinner).
+          const keep =
+            ids.find(id => isStationary(id)) ||
+            ids.find(id => blockedUnits.has(id) || combatResolvedThisTick.has(id)) ||
+            pickWinner(ids, unitsById);
+          ids.forEach(id => {
+            if (id === keep) return;
+            if (!blockedUnits.has(id)) {
+              block(id);
+              changed = true;
+            } else if (!samePos(desired[id], livePositions[id])) {
+              desired[id] = { ...livePositions[id] };
+              changed = true;
+            }
+          });
+        });
       }
     }
 
