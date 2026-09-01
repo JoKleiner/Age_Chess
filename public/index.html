@@ -21,10 +21,19 @@
 
       <div id="planPanel" class="plan-panel hidden">
         <div id="planUnitLabel" class="plan-unit-label"></div>
-        <table id="planTable">
-          <thead><tr></tr></thead>
-          <tbody><tr></tr></tbody>
-        </table>
+        <div class="plan-row">
+          <table id="planTable">
+            <thead><tr></tr></thead>
+            <tbody><tr></tr></tbody>
+          </table>
+          <table id="shotInfoTable" class="shot-info-table hidden">
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="shotControls" class="shot-controls hidden">
+          <button id="farShotButton" type="button">Weitschuss (3 Takte)</button>
+          <button id="nearShotButton" type="button">Nahschuss (2 Takte)</button>
+        </div>
       </div>
     </div>
 

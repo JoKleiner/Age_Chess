@@ -51,7 +51,25 @@
       {
         key: 'bogenschuetze', label: 'Bogenschütze', maxPerPlayer: 3, maxSteps: 2, speedRank: 1,
         chip: { kind: 'image', imageFolder: 'Schuetze', imageBase: 'Schütze' },
-        hp: 10, damage: { reiter: 0, bogenschuetze: 0, schwertkaempfer: 0, lanze: 0 }
+        hp: 10, damage: { reiter: 0, bogenschuetze: 0, schwertkaempfer: 0, lanze: 0 },
+        // Fernkampf ("Beschuss"): eigener Schadenswert je Zieltyp, voellig
+        // unabhaengig von damage[] (im Nahkampf macht der Schuetze weiterhin 0).
+        // Gesamtschaden eines Schusses = (lebende Schuetzen-Einheiten ZUM
+        // ABSCHUSS-ZEITPUNKT) * rangedDamage[Zieltyp]. Dieser Wert wird beim
+        // Abschuss eingefroren - die Pfeile kommen erst spaeter an und machen
+        // vollen Schaden, auch wenn das Bataillon zwischenzeitlich dezimiert
+        // oder zerstoert wurde.
+        rangedDamage: { reiter: 4, bogenschuetze: 4, schwertkaempfer: 3, lanze: 7 },
+        // Zwei Schussarten. ticks = Anzahl Takte vom Abschuss BIS zum Einschlag
+        // (Abschuss-Takt eingerechnet): Weitschuss Takt n -> Einschlag Takt n+2,
+        // Nahschuss Takt n -> Einschlag Takt n+1. maxLaunchTick (1-basiert)
+        // begrenzt den Abschuss so, dass der Einschlag noch in den 4-Takt-
+        // Horizont faellt. Weitschuss trifft EIN Feld in Distanz 2..3; Nahschuss
+        // trifft eine der 6 Nachbar-Richtungen (Nahbarfeld + Feld dahinter).
+        shots: {
+          far:  { key: 'far',  label: 'Weitschuss', ticks: 3, minRange: 2, maxRange: 3, maxLaunchTick: 2 },
+          near: { key: 'near', label: 'Nahschuss',  ticks: 2, maxLaunchTick: 3 }
+        }
       }
     ]
   };
@@ -95,6 +113,22 @@
     const type = UnitTypes.byKey(typeKey);
     if (!type || currentHp <= 0) return 0;
     return Math.min(UnitTypes.BATTALION_SIZE, Math.ceil(currentHp / type.hp));
+  };
+
+  // Fernkampf-Schaden, den EINE einzelne Einheit der Art attackerTypeKey per
+  // Beschuss an EINER einzelnen Einheit der Art defenderTypeKey verursacht
+  // (noch mit der Anzahl beim Abschuss lebender Einheiten zu multiplizieren).
+  UnitTypes.rangedDamageOf = function (attackerTypeKey, defenderTypeKey) {
+    const type = UnitTypes.byKey(attackerTypeKey);
+    return type && type.rangedDamage && type.rangedDamage[defenderTypeKey] != null
+      ? type.rangedDamage[defenderTypeKey] : 0;
+  };
+
+  // Konfiguration einer Schussart ('far' | 'near') einer Einheiten-Art, oder
+  // null, wenn die Art nicht schiessen kann.
+  UnitTypes.shotConfig = function (typeKey, shotType) {
+    const type = UnitTypes.byKey(typeKey);
+    return type && type.shots ? (type.shots[shotType] || null) : null;
   };
 
   if (typeof module !== 'undefined' && module.exports) {

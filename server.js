@@ -16,6 +16,56 @@ const validCellKeys = new Set(
   HexBoard.generateBoardCells().map(c => HexBoard.keyOf(c.q, c.r))
 );
 
+// Baut aus der (ungeprueften) Schuss-Angabe eines Clients die kanonische,
+// serverseitig verbindliche Form: { type, launchTick, arrivalTick, cells }.
+// - launchTick0 ist 0-basiert (Index des Schuss-Schritts im Schritt-Array).
+// - launchPos ist die Schuetzen-Position im Abschuss-Takt (= Feld des Schuss-
+//   Schritts, da der Schuetze in diesem Takt stehen bleibt).
+// - cells sind ABSOLUTE Felder: beim Weitschuss das eine Zielfeld, beim
+//   Nahschuss das Nachbarfeld in der gewaehlten Richtung plus - falls es auf
+//   dem Brett liegt - das Feld direkt dahinter.
+// Gibt null zurueck, wenn irgendetwas ungueltig ist (der ganze Plan gilt dann
+// als ungueltig).
+function canonicalShot(rawShot, launchPos, launchTick0, typeKey) {
+  if (typeKey !== 'bogenschuetze' || !rawShot || typeof rawShot !== 'object') return null;
+
+  if (rawShot.type === 'far') {
+    const cfg = UnitTypes.shotConfig('bogenschuetze', 'far');
+    if (!cfg || launchTick0 > cfg.maxLaunchTick - 1) return null;
+    const t = rawShot.target;
+    if (!t || typeof t.q !== 'number' || typeof t.r !== 'number') return null;
+    if (!validCellKeys.has(HexBoard.keyOf(t.q, t.r))) return null;
+    const d = HexBoard.hexDistance(launchPos, t);
+    if (d < cfg.minRange || d > cfg.maxRange) return null;
+    return {
+      type: 'far',
+      launchTick: launchTick0,
+      arrivalTick: launchTick0 + cfg.ticks - 1,
+      cells: [{ q: t.q, r: t.r }]
+    };
+  }
+
+  if (rawShot.type === 'near') {
+    const cfg = UnitTypes.shotConfig('bogenschuetze', 'near');
+    if (!cfg || launchTick0 > cfg.maxLaunchTick - 1) return null;
+    const dir = rawShot.dir;
+    if (!dir || !HexBoard.DIRECTIONS.some(D => D.dq === dir.dq && D.dr === dir.dr)) return null;
+    const primary = { q: launchPos.q + dir.dq, r: launchPos.r + dir.dr };
+    if (!validCellKeys.has(HexBoard.keyOf(primary.q, primary.r))) return null;
+    const behind = { q: launchPos.q + 2 * dir.dq, r: launchPos.r + 2 * dir.dr };
+    const cells = [primary];
+    if (validCellKeys.has(HexBoard.keyOf(behind.q, behind.r))) cells.push(behind);
+    return {
+      type: 'near',
+      launchTick: launchTick0,
+      arrivalTick: launchTick0 + cfg.ticks - 1,
+      cells
+    };
+  }
+
+  return null;
+}
+
 const rooms = {};
 // rooms[roomId] = {
 //   sockets: { blue: socketId, red: socketId },
@@ -82,15 +132,29 @@ function isValidUnitSteps(steps, startPos, typeKey) {
 
   let previous = startPos;
   let moveCount = 0;
-  for (const step of steps) {
-    if (typeof step.q !== 'number' || typeof step.r !== 'number') return false;
+  let shotCount = 0;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step || typeof step.q !== 'number' || typeof step.r !== 'number') return false;
     if (!validCellKeys.has(HexBoard.keyOf(step.q, step.r))) return false;
     const distance = HexBoard.hexDistance(previous, step);
     if (distance > 1) return false; // 0 = bleiben, 1 = bewegen
     if (distance === 1) moveCount++;
+    if (step.shot != null) {
+      // Ein Bogenschuetzen-Schuss haengt als Zusatz an einem "bleibt"-Schritt
+      // (im Abschuss-Takt steht der Schuetze). Geometrie/Takt werden hier
+      // mitgeprueft (canonicalShot == null -> ungueltiger Plan).
+      if (distance !== 0) return false;
+      if (!canonicalShot(step.shot, step, i, typeKey)) return false;
+      shotCount++;
+    }
     previous = step;
   }
-  if (moveCount > UnitTypes.maxStepsFor(typeKey)) return false;
+  if (shotCount > 1) return false; // hoechstens 1 Schuss pro Runde
+  // Wer schiesst, darf hoechstens 1 Feld laufen; sonst gilt das normale Limit
+  // der Art (Reiter 4, sonst 2).
+  const moveCap = shotCount > 0 ? 1 : UnitTypes.maxStepsFor(typeKey);
+  if (moveCount > moveCap) return false;
   return true;
 }
 
@@ -168,14 +232,44 @@ function resolveRound(room, combinedPlan) {
   const unitsById = {};
   room.units.forEach(u => { unitsById[u.id] = u; });
 
-  const totalTicks = Math.max(0, ...Object.values(combinedPlan).map(s => s.length));
   const livePositions = {};
   Object.keys(combinedPlan).forEach(id => { livePositions[id] = { ...room.positions[id] }; });
 
   const hp = { ...room.hp };
   const blockedUnits = new Set();
+  // Bataillone, die in dieser Runde schon in einem KAMPF waren (persistiert
+  // ueber Takte). Ein Bogenschuetze, der gekaempft hat, feuert danach nicht
+  // mehr ab; im Abschuss-Takt selbst wird aber "zuerst gefeuert, dann
+  // gekaempft" (der Abschuss laeuft im Takt-Kopf vor jeder Kampf-Aufloesung).
+  const foughtUnits = new Set();
   const deadUnits = new Set(Object.keys(hp).filter(id => hp[id] <= 0));
   const ticks = [];
+
+  // Bogenschuetzen-Schuesse aus den Plaenen ziehen (hoechstens einer pro
+  // Einheit). type / Takte / cells stehen bereits fest - cells sind absolute
+  // Felder, unabhaengig davon, wo der Schuetze im Abschuss-Takt am Ende
+  // wirklich steht.
+  const pendingShots = [];
+  Object.keys(combinedPlan).forEach(unitId => {
+    const steps = combinedPlan[unitId];
+    for (let i = 0; i < steps.length; i++) {
+      if (steps[i] && steps[i].shot != null) {
+        const canon = canonicalShot(steps[i].shot, steps[i], i, unitsById[unitId].typeKey);
+        if (canon) {
+          pendingShots.push({
+            unitId, fired: false, resolved: false, cancelled: false,
+            livingAtLaunch: 0, ...canon
+          });
+        }
+        break;
+      }
+    }
+  });
+
+  // Der Rundenhorizont muss lang genug sein, dass jeder Pfeil noch ankommt -
+  // auch wenn der Schuetze selbst nur 2 Takte plant.
+  let totalTicks = Math.max(0, ...Object.values(combinedPlan).map(s => s.length));
+  pendingShots.forEach(s => { totalTicks = Math.max(totalTicks, s.arrivalTick + 1); });
 
   // Per-Takt-Zustand - wird zu Beginn jedes Takts neu gesetzt und von den
   // Kampf-Closures unten ueber den Closure-Verweis gelesen/geschrieben.
@@ -192,6 +286,7 @@ function resolveRound(room, combinedPlan) {
   const markFought = (ids) => ids.forEach(id => {
     combatResolvedThisTick.add(id);
     blockedUnits.add(id);
+    foughtUnits.add(id);
   });
 
   // Baut ein Kampf-Ereignis fuer die Client-Animation. `partById` liefert pro
@@ -542,6 +637,64 @@ function resolveRound(room, combinedPlan) {
   };
 
   for (let tick = 0; tick < totalTicks; tick++) {
+    const arrowEvents = [];
+
+    // --- Bogenschuetzen-Schuesse: Abschuesse dieses Takts ---
+    // "Zuerst gefeuert, dann angegriffen": der Schaden wird JETZT - vor jeder
+    // Kampf-Aufloesung dieses Takts - aus den aktuell lebenden Schuetzen-
+    // Einheiten eingefroren. Verfall, wenn der Schuetze in einem FRUEHEREN
+    // Takt gekaempft hat oder nicht mehr existiert.
+    pendingShots.forEach(shot => {
+      if (shot.fired || shot.cancelled || shot.launchTick !== tick) return;
+      shot.fired = true;
+      if (deadUnits.has(shot.unitId) || foughtUnits.has(shot.unitId)) { shot.cancelled = true; return; }
+      shot.livingAtLaunch = UnitTypes.livingUnitsFor(unitsById[shot.unitId].typeKey, hp[shot.unitId]);
+      if (shot.livingAtLaunch <= 0) { shot.cancelled = true; return; }
+      arrowEvents.push({
+        id: shot.unitId + '#' + shot.launchTick,
+        kind: 'launch',
+        shotType: shot.type,
+        from: { ...livePositions[shot.unitId] },
+        cells: shot.cells.map(c => ({ q: c.q, r: c.r })),
+        launchTick: shot.launchTick,
+        arrivalTick: shot.arrivalTick
+      });
+    });
+
+    // --- Bogenschuetzen-Schuesse: Einschlaege dieses Takts ---
+    // Schaden VOR Bewegungen/Nahkampf. Getroffen wird, wer JETZT (Stand Ende
+    // Vor-Takt) auf dem Feld steht - auch wenn er diesen Takt wegziehen wollte;
+    // wer diesen Takt erst hinzieht, wird nicht getroffen. Nahschuss: das
+    // erste besetzte Feld der Linie faengt den vollen Schaden, dahinter kommt
+    // nichts mehr an. Sinkt ein Bataillon auf 0 HP, ist es sofort raus (das
+    // Feld ist damit fuer die Bewegungen dieses Takts frei).
+    pendingShots.forEach(shot => {
+      if (shot.cancelled || shot.resolved || shot.arrivalTick !== tick) return;
+      shot.resolved = true;
+      const hits = [];
+      let impactCell = null;
+      for (const cell of shot.cells) {
+        const key = HexBoard.keyOf(cell.q, cell.r);
+        const victim = room.units.find(u => !deadUnits.has(u.id) && posKeyOf(livePositions[u.id]) === key);
+        if (!victim) continue;
+        impactCell = { q: cell.q, r: cell.r };
+        const dmg = shot.livingAtLaunch * UnitTypes.rangedDamageOf('bogenschuetze', victim.typeKey);
+        hp[victim.id] = Math.max(0, hp[victim.id] - dmg);
+        const defeated = hp[victim.id] <= 0;
+        if (defeated) deadUnits.add(victim.id);
+        hits.push({ unitId: victim.id, hpAfter: hp[victim.id], defeated });
+        break;
+      }
+      arrowEvents.push({
+        id: shot.unitId + '#' + shot.launchTick,
+        kind: 'impact',
+        shotType: shot.type,
+        cells: shot.cells.map(c => ({ q: c.q, r: c.r })),
+        impactCell,
+        hits
+      });
+    });
+
     desired = {};
     Object.keys(combinedPlan).forEach(unitId => {
       if (deadUnits.has(unitId)) return; // existiert nicht mehr
@@ -806,7 +959,8 @@ function resolveRound(room, combinedPlan) {
     ticks.push({
       positions: Object.fromEntries(Object.keys(desired).map(id => [id, { ...livePositions[id] }])),
       blockedAttempts,
-      combatEvents
+      combatEvents,
+      arrowEvents
     });
   }
 

@@ -20,6 +20,11 @@ const planPanel = document.getElementById('planPanel');
 const planUnitLabel = document.getElementById('planUnitLabel');
 const planHeadRow = document.querySelector('#planTable thead tr');
 const planBodyRow = document.querySelector('#planTable tbody tr');
+const shotControls = document.getElementById('shotControls');
+const farShotButton = document.getElementById('farShotButton');
+const nearShotButton = document.getElementById('nearShotButton');
+const shotInfoTable = document.getElementById('shotInfoTable');
+const shotInfoBody = document.querySelector('#shotInfoTable tbody');
 const confirmButton = document.getElementById('confirmButton');
 const editButton = document.getElementById('editButton');
 const tickDisplay = document.getElementById('tickDisplay');
@@ -53,6 +58,7 @@ let hp = {};                 // unitId -> aktuelle Bataillons-HP, für ALLE Einh
 let myPlans = {};           // unitId -> geplante Schritte, nur für EIGENE (lebende) Einheiten
 let selectedUnitId = null;  // welche eigene Einheit wird gerade geplant
 let confirmed = false;
+let shotTargeting = null;   // 'far' | 'near' | null - Feld-/Richtungswahl fuer einen Schuss laeuft gerade
 
 // Spieler Rot bekommt das Brett um 180° gedreht angezeigt (eigene Einheiten unten
 // im Bild), Farben bleiben aber echt (rot ist rot, blau ist blau).
@@ -110,6 +116,10 @@ const unitLayer = document.createElementNS(SVG_NS, 'g');
 svg.appendChild(unitLayer);
 const hpBarLayer = document.createElementNS(SVG_NS, 'g');
 svg.appendChild(hpBarLayer);
+// Fliegende Pfeile (Bogenschuetzen-Beschuss) - liegt ueber allem anderen.
+const arrowLayer = document.createElementNS(SVG_NS, 'g');
+svg.appendChild(arrowLayer);
+const activeArrows = {}; // eventId -> { el, fromPos, toPos, launchTick, arrivalTick, cellEls }
 
 // ---------- Chip-Zeichnung (gemeinsam für Platzierungs-Vorschau & Spiel-Einheiten) ----------
 
@@ -588,6 +598,7 @@ function removeDefeatedUnit(unitId) {
 
 function selectUnit(unitId) {
   selectedUnitId = unitId;
+  shotTargeting = null;
   planPanel.classList.remove('plan-panel-invisible');
 
   const unit = unitsById[unitId];
@@ -604,6 +615,7 @@ function selectUnit(unitId) {
 
 function closePlanning() {
   selectedUnitId = null;
+  shotTargeting = null;
   planPanel.classList.add('plan-panel-invisible');
   planUnitLabel.textContent = ' '; // geschütztes Leerzeichen, sonst kollabiert die Zeilenhöhe (Spielfeld "springt")
   renderPlanTable();
@@ -622,7 +634,37 @@ function currentUnitPlan() {
 // die ersten beiden Takte aussetzen ("bleibt") und erst in Takt 3+4 laufen.
 function currentUnitMaxMoves() {
   if (!selectedUnitId) return UnitTypes.DEFAULT_MAX_STEPS;
-  return UnitTypes.maxStepsFor(unitsById[selectedUnitId].typeKey);
+  const base = UnitTypes.maxStepsFor(unitsById[selectedUnitId].typeKey);
+  // Wer in dieser Runde schiesst, darf hoechstens 1 Feld laufen.
+  if (findShotStep(currentUnitPlan())) return Math.min(base, 1);
+  return base;
+}
+
+// Sucht den (hoechstens einen) Schuss-Schritt im Plan.
+function findShotStep(plan) {
+  for (let i = 0; i < plan.length; i++) {
+    if (plan[i] && plan[i].shot != null) return { step: plan[i], index: i };
+  }
+  return null;
+}
+
+// Anzeige-Form eines geplanten Schusses (nur Client - fuer Marker + Nebentabelle).
+// Absolute Felder werden - wie serverseitig in canonicalShot - aus der
+// Schuetzen-Position im Abschuss-Takt (= Feld des Schuss-Schritts) und der
+// Richtung berechnet.
+function shotDisplay(shotStep, index) {
+  const shot = shotStep.shot;
+  const launch = { q: shotStep.q, r: shotStep.r };
+  if (shot.type === 'far') {
+    const cfg = UnitTypes.shotConfig('bogenschuetze', 'far');
+    return { type: 'far', cells: [{ q: shot.target.q, r: shot.target.r }], launchTick: index, arrivalTick: index + cfg.ticks - 1 };
+  }
+  const cfg = UnitTypes.shotConfig('bogenschuetze', 'near');
+  const primary = { q: launch.q + shot.dir.dq, r: launch.r + shot.dir.dr };
+  const behind = { q: launch.q + 2 * shot.dir.dq, r: launch.r + 2 * shot.dir.dr };
+  const cells = [primary];
+  if (hexElements[HexBoard.keyOf(behind.q, behind.r)]) cells.push(behind);
+  return { type: 'near', cells, launchTick: index, arrivalTick: index + cfg.ticks - 1 };
 }
 
 // Zaehlt, wie viele Eintraege im Plan tatsaechliche Feldwechsel sind
@@ -657,7 +699,11 @@ function renderPlanTable() {
       const previous = i === 0 ? positions[selectedUnitId] : plan[i - 1];
       const isSkip = previous.q === plan[i].q && previous.r === plan[i].r;
 
-      if (isSkip) {
+      if (plan[i].shot != null) {
+        const cfg = UnitTypes.shotConfig('bogenschuetze', plan[i].shot.type);
+        td.textContent = `🏹 ${cfg ? cfg.label : ''}`;
+        td.classList.add('shot-cell');
+      } else if (isSkip) {
         td.textContent = 'bleibt';
         td.classList.add('skip-cell');
       } else {
@@ -681,6 +727,142 @@ function renderPlanTable() {
 
     planBodyRow.appendChild(td);
   }
+
+  refreshShotUI();
+}
+
+// ---------- Bogenschuetzen-Schuss: Buttons, Nebentabelle, Feld-Marker ----------
+
+// Baut Buttons/Nebentabelle/Marker fuer die aktuell gewaehlte Einheit neu auf.
+// Wird am Ende jedes renderPlanTable()-Durchlaufs aufgerufen.
+function refreshShotUI() {
+  Object.values(hexElements).forEach(el =>
+    el.classList.remove('shot-target', 'shot-target-2'));
+  shotInfoTable.classList.add('hidden');
+  shotInfoBody.innerHTML = '';
+
+  const unit = selectedUnitId && unitsById[selectedUnitId];
+  const isArcher = unit && unit.typeKey === 'bogenschuetze';
+  if (!isArcher) {
+    shotControls.classList.add('hidden');
+    shotTargeting = null;
+    return;
+  }
+
+  const plan = currentUnitPlan();
+  const existing = findShotStep(plan);
+
+  if (confirmed) {
+    shotControls.classList.add('hidden');
+    shotTargeting = null;
+  } else {
+    shotControls.classList.remove('hidden');
+    const moves = countMoveSteps(plan, positions[selectedUnitId]);
+    const nextTick = plan.length; // 0-basierter Index des gerade geplanten Takts
+    const canArm = !existing && plan.length < UnitTypes.DEFAULT_MAX_STEPS && moves <= 1;
+    const farCfg = UnitTypes.shotConfig('bogenschuetze', 'far');
+    const nearCfg = UnitTypes.shotConfig('bogenschuetze', 'near');
+    farShotButton.disabled = !(canArm && nextTick <= farCfg.maxLaunchTick - 1);
+    nearShotButton.disabled = !(canArm && nextTick <= nearCfg.maxLaunchTick - 1);
+    farShotButton.classList.toggle('arming', shotTargeting === 'far');
+    nearShotButton.classList.toggle('arming', shotTargeting === 'near');
+  }
+
+  if (existing) {
+    const disp = shotDisplay(existing.step, existing.index);
+    const p = hexElements[HexBoard.keyOf(disp.cells[0].q, disp.cells[0].r)];
+    if (p) p.classList.add('shot-target');
+    if (disp.cells[1]) {
+      const s = hexElements[HexBoard.keyOf(disp.cells[1].q, disp.cells[1].r)];
+      if (s) s.classList.add('shot-target-2');
+    }
+    renderShotInfoTable(disp);
+  }
+}
+
+function renderShotInfoTable(disp) {
+  const cfg = UnitTypes.shotConfig('bogenschuetze', disp.type);
+  const label = (c) => {
+    const l = HexBoard.labelOf(c.q, c.r);
+    return `${l.col},${l.row}`;
+  };
+  const rows = [
+    ['Schuss', cfg.label],
+    ['Abschuss', `Takt ${disp.launchTick + 1}`]
+  ];
+  if (disp.type === 'far') rows.push(['in der Luft', `Takt ${disp.launchTick + 2}`]);
+  rows.push(['Ankunft', `Takt ${disp.arrivalTick + 1}`]);
+  rows.push(['Ziel', disp.cells.map(label).join(' → ')]);
+
+  shotInfoBody.innerHTML = '';
+  rows.forEach(([k, v]) => {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.textContent = k;
+    const td = document.createElement('td');
+    td.textContent = v;
+    tr.appendChild(th);
+    tr.appendChild(td);
+    shotInfoBody.appendChild(tr);
+  });
+  shotInfoTable.classList.remove('hidden');
+}
+
+// Schaltet die Feld-/Richtungswahl fuer eine Schussart an (oder wieder aus,
+// wenn schon aktiv). Wird von den beiden Schuss-Buttons aufgerufen.
+function enterShotTargeting(type) {
+  if (!selectedUnitId || confirmed) return;
+  const btn = type === 'far' ? farShotButton : nearShotButton;
+  if (btn.disabled && shotTargeting !== type) return;
+
+  shotTargeting = (shotTargeting === type) ? null : type;
+  clearHighlights();
+  if (shotTargeting) {
+    highlightShotTargets();
+    statusEl.textContent = shotTargeting === 'far'
+      ? 'Weitschuss: Zielfeld waehlen (2-3 Felder entfernt).'
+      : 'Nahschuss: eine der 6 Nachbar-Richtungen waehlen.';
+  } else {
+    highlightNextOptions();
+  }
+  refreshShotUI();
+}
+
+function highlightShotTargets() {
+  clearHighlights();
+  const from = currentPlanEndPosition();
+  if (shotTargeting === 'far') {
+    const cfg = UnitTypes.shotConfig('bogenschuetze', 'far');
+    Object.entries(hexElements).forEach(([key, el]) => {
+      const [q, r] = key.split(',').map(Number);
+      const d = HexBoard.hexDistance(from, { q, r });
+      if (d >= cfg.minRange && d <= cfg.maxRange) el.classList.add('shot-selectable');
+    });
+  } else if (shotTargeting === 'near') {
+    HexBoard.DIRECTIONS.forEach(({ dq, dr }) => {
+      const el = hexElements[HexBoard.keyOf(from.q + dq, from.r + dr)];
+      if (el) el.classList.add('shot-selectable');
+    });
+  }
+}
+
+function handleShotTargetClick(q, r) {
+  const el = hexElements[HexBoard.keyOf(q, r)];
+  if (!el || !el.classList.contains('shot-selectable')) return;
+
+  const from = currentPlanEndPosition();
+  let shot;
+  if (shotTargeting === 'far') {
+    shot = { type: 'far', target: { q, r } };
+  } else {
+    shot = { type: 'near', dir: { dq: q - from.q, dr: r - from.r } };
+  }
+  currentUnitPlan().push({ q: from.q, r: from.r, shot });
+  shotTargeting = null;
+  clearHighlights();
+  renderPlanTable();
+  renderPath();
+  highlightNextOptions();
 }
 
 function currentPlanEndPosition() {
@@ -690,7 +872,7 @@ function currentPlanEndPosition() {
 }
 
 function clearHighlights() {
-  Object.values(hexElements).forEach(el => el.classList.remove('selectable', 'own-zone'));
+  Object.values(hexElements).forEach(el => el.classList.remove('selectable', 'own-zone', 'shot-selectable'));
 }
 
 function highlightNextOptions() {
@@ -772,6 +954,11 @@ function handleBoardClick(q, r) {
 
   if (!selectedUnitId || confirmed) return;
 
+  if (shotTargeting) {
+    handleShotTargetClick(q, r);
+    return;
+  }
+
   const plan = currentUnitPlan();
   if (plan.length >= UnitTypes.DEFAULT_MAX_STEPS) return;
   if (countMoveSteps(plan, positions[selectedUnitId]) >= currentUnitMaxMoves()) return;
@@ -786,12 +973,16 @@ function handleBoardClick(q, r) {
   highlightNextOptions();
 }
 
+farShotButton.addEventListener('click', () => enterShotTargeting('far'));
+nearShotButton.addEventListener('click', () => enterShotTargeting('near'));
+
 confirmButton.addEventListener('click', () => {
   if (confirmed || !myRoomId || !myRole) return;
   confirmed = true;
   confirmButton.disabled = true;
   editButton.classList.remove('hidden');
   clearHighlights();
+  refreshShotUI();
   statusEl.textContent = 'Züge bestätigt. Warte auf Gegenspieler...';
   socket.emit('submitPlan', { roomId: myRoomId, plan: myPlans });
 });
@@ -930,6 +1121,90 @@ async function animateCombatEvent(event) {
   participants.forEach(p => { if (p.defeated) removeDefeatedUnit(p.unitId); });
 }
 
+// ---------- Fliegende Pfeile (Bogenschuetzen-Beschuss) ----------
+
+const ARROW_RADIUS = Math.max(3, CHIP_RADIUS * 0.38);
+
+// Neuen Pfeil erzeugen: Punkt am Schuetzen-Feld, Zielfeld(er) markieren.
+function spawnArrow(ev) {
+  if (activeArrows[ev.id]) return;
+  const to = ev.cells[ev.cells.length - 1]; // Linienende (Nahschuss: Feld dahinter)
+  const dot = document.createElementNS(SVG_NS, 'circle');
+  dot.setAttribute('r', ARROW_RADIUS);
+  dot.classList.add('arrow-dot');
+  const p = toScreen(ev.from.q, ev.from.r);
+  dot.setAttribute('transform', `translate(${p.x}, ${p.y})`);
+  arrowLayer.appendChild(dot);
+
+  const cellEls = ev.cells
+    .map(c => hexElements[HexBoard.keyOf(c.q, c.r)])
+    .filter(Boolean);
+  cellEls.forEach(el => el.classList.add('arrow-target-cell'));
+
+  activeArrows[ev.id] = {
+    el: dot, fromPos: ev.from, toPos: to,
+    launchTick: ev.launchTick, arrivalTick: ev.arrivalTick, cellEls
+  };
+}
+
+// Alle fliegenden Pfeile auf ihren Bruchteil des Wegs fuer diesen Takt setzen.
+function advanceArrows(tick) {
+  Object.values(activeArrows).forEach(a => {
+    if (a.arrivalTick === tick) return; // Einschlag positioniert selbst
+    const span = Math.max(1, a.arrivalTick - a.launchTick);
+    const frac = Math.max(0, Math.min(1, (tick - a.launchTick) / span));
+    const pt = pointAtFraction(a.fromPos, a.toPos, frac);
+    a.el.style.transitionDuration = `${BASE_MOVE_DURATION}ms`;
+    a.el.setAttribute('transform', `translate(${pt.x}, ${pt.y})`);
+  });
+}
+
+function clearArrows() {
+  Object.values(activeArrows).forEach(a => {
+    a.cellEls.forEach(el => el.classList.remove('arrow-target-cell'));
+    a.el.remove();
+  });
+  Object.keys(activeArrows).forEach(k => delete activeArrows[k]);
+}
+
+// Einschlag: an die Einschlagstelle ziehen, Feld markieren, HP/Marken der
+// Getroffenen aktualisieren, besiegte Bataillone entfernen. animateRound ruft
+// dies fuer die Einschlaege eines Takts NACHEINANDER auf, vor dem
+// Bewegungs-/Kampf-Ablauf (der Server rechnet den Pfeilschaden zuerst).
+async function animateArrowImpact(ev) {
+  const a = activeArrows[ev.id];
+  const landing = ev.impactCell || ev.cells[ev.cells.length - 1];
+
+  if (a) {
+    const pt = toScreen(landing.q, landing.r);
+    a.el.style.transitionDuration = `${QUARTER_MOVE_DURATION}ms`;
+    a.el.setAttribute('transform', `translate(${pt.x}, ${pt.y})`);
+    await wait(QUARTER_MOVE_DURATION);
+  }
+
+  let impactEl = null;
+  if (ev.impactCell) {
+    impactEl = hexElements[HexBoard.keyOf(ev.impactCell.q, ev.impactCell.r)];
+    if (impactEl) impactEl.classList.add('arrow-impact-cell');
+  }
+  await wait(COMBAT_MARK_HOLD);
+
+  ev.hits.forEach(h => {
+    if (hp[h.unitId] == null) return;
+    hp[h.unitId] = h.hpAfter;
+    updateHpBar(h.unitId);
+  });
+  await wait(200);
+  ev.hits.forEach(h => { if (h.defeated) removeDefeatedUnit(h.unitId); });
+
+  if (impactEl) impactEl.classList.remove('arrow-impact-cell');
+  if (a) {
+    a.cellEls.forEach(el => el.classList.remove('arrow-target-cell'));
+    a.el.remove();
+    delete activeArrows[ev.id];
+  }
+}
+
 async function animateRound(ticks) {
   tickDisplay.classList.remove('tick-display-invisible');
 
@@ -937,7 +1212,15 @@ async function animateRound(ticks) {
     tickDisplay.textContent = `Takt ${tick + 1} von ${ticks.length}`;
     await wait(TICK_LABEL_DELAY);
 
-    const { positions: tickPositions, blockedAttempts, combatEvents } = ticks[tick];
+    const { positions: tickPositions, blockedAttempts, combatEvents, arrowEvents = [] } = ticks[tick];
+
+    // Pfeile: neue abschiessen, fliegende weiterbewegen, Einschlaege zuerst
+    // abhandeln (Server rechnet Pfeilschaden VOR Bewegung/Nahkampf des Takts).
+    arrowEvents.forEach(ev => { if (ev.kind === 'launch') spawnArrow(ev); });
+    advanceArrows(tick);
+    for (const ev of arrowEvents) {
+      if (ev.kind === 'impact') await animateArrowImpact(ev);
+    }
 
     // Einheiten, die diesen Takt bereits "behandelt" wurden (blockiert oder
     // im Kampf unterlegen/gleichstehend) und deshalb NICHT mehr in Phase 3
@@ -1029,10 +1312,12 @@ async function animateRound(ticks) {
   }
 
   tickDisplay.classList.add('tick-display-invisible');
+  clearArrows();
   Object.values(unitsById).filter(u => u.role === myRole).forEach(u => {
     myPlans[u.id] = [];
   });
   confirmed = false;
+  shotTargeting = null;
   confirmButton.disabled = false;
   statusEl.textContent = 'Neue Runde - klick auf eine deiner Einheiten, um Züge zu planen.';
 }
