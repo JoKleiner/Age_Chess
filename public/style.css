@@ -23,9 +23,21 @@ body {
   flex: 0 0 auto;
 }
 
+/* Raum-Name, darunter der Spieler-Name, darunter der Button. */
+#joinArea {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
 #status {
   font-size: 16px;
   color: #333;
+  /* Zwei Zeilen fest reservieren: die Meldungen wechseln zwischen ein- und
+     zweizeilig (z.B. beim Klick auf einen Schuss-Button) - ohne feste Hoehe
+     wuerde das Spielfeld dabei springen. */
+  min-height: 2.4em;
 }
 
 .hex {
@@ -70,16 +82,71 @@ body {
 
 /* Bogenschuetzen-Beschuss */
 .hex.shot-selectable  { fill: #b7e2ad; stroke: #4a8f3f; stroke-width: 2; }
-.hex.shot-target      { stroke: #6a3fb0; stroke-width: 4; }
-.hex.shot-target-2    { stroke: #9a7fd0; stroke-width: 3; stroke-dasharray: 4 3; }
-.hex.arrow-target-cell { stroke: #6a3fb0; stroke-width: 3; stroke-dasharray: 3 3; }
+
+/* Zielfeld des geplanten Schusses: weicher lila Grund, kraeftiger Rahmen und
+   ein ruhig pulsierender Glow - deutlich sichtbar, ohne hart zu wirken. */
+.hex.shot-target {
+  fill: #cbb3ec;
+  stroke: #5a2fa0;
+  stroke-width: 3.5;
+  paint-order: stroke;
+  filter: drop-shadow(0 0 3px rgba(106, 63, 176, 0.85));
+  animation: shot-target-pulse 1.5s ease-in-out infinite;
+}
+/* Zweites Feld (Nahschuss trifft zwei Felder): dezenter, gestrichelt. */
+.hex.shot-target-2 {
+  fill: #e2d4f6;
+  stroke: #8a6cc4;
+  stroke-width: 2.5;
+  stroke-dasharray: 5 3;
+}
+@keyframes shot-target-pulse {
+  0%, 100% { stroke-opacity: 1; filter: drop-shadow(0 0 2px rgba(106, 63, 176, 0.7)); }
+  50%      { stroke-opacity: 0.55; filter: drop-shadow(0 0 6px rgba(106, 63, 176, 0.95)); }
+}
 .hex.arrow-impact-cell { fill: #d98a2b; stroke: #7a4a10; stroke-width: 3; }
-.arrow-dot {
+
+.arrow-shot {
   fill: #2b2b2b;
   stroke: #f0f0f0;
-  stroke-width: 1;
+  stroke-width: 0.75;
+  stroke-linejoin: round;
   pointer-events: none;
   transition: transform 0.7s linear;
+  /* laeuft genau einmal beim Erscheinen - kurzer heller Aufblitz, damit der
+     Abschuss deutlich auffaellt */
+  animation: arrow-spawn 550ms ease-out;
+}
+@keyframes arrow-spawn {
+  0% {
+    fill: #ffe14d;
+    stroke: #ffffff;
+    stroke-width: 2.5;
+    filter: drop-shadow(0 0 7px rgba(255, 214, 64, 0.95));
+  }
+  55% {
+    fill: #ffd23f;
+    stroke-width: 1.6;
+    filter: drop-shadow(0 0 4px rgba(255, 214, 64, 0.6));
+  }
+  100% {
+    fill: #2b2b2b;
+    stroke: #f0f0f0;
+    stroke-width: 0.75;
+    filter: drop-shadow(0 0 0 rgba(0, 0, 0, 0));
+  }
+}
+
+/* Abschuss-Blitz: heller Ring, der am Startpunkt kurz aufploppt und verpufft */
+.arrow-burst {
+  fill: none;
+  stroke: #ffe14d;
+  pointer-events: none;
+  animation: arrow-burst 480ms ease-out forwards;
+}
+@keyframes arrow-burst {
+  0%   { opacity: 0.95; r: 2;  stroke-width: 3.5; }
+  100% { opacity: 0;    r: 20; stroke-width: 0.5; }
 }
 
 .unit {
@@ -90,6 +157,11 @@ body {
 .unit.defeated {
   opacity: 0;
   pointer-events: none;
+}
+/* Waehrend "Abfangen" laeuft: waehlbare gegnerische Einheiten hervorheben. */
+.unit.intercept-selectable {
+  cursor: crosshair;
+  filter: drop-shadow(0 0 3px #b5741f) drop-shadow(0 0 6px #ffb200);
 }
 
 .chip-circle {
@@ -104,6 +176,35 @@ body {
   text-anchor: middle;
   dominant-baseline: central;
   pointer-events: none;
+}
+
+/* Blickrichtungs-Dreieck am Reiter-Chip (Team-Farbe, an allen Reitern
+   sichtbar - auch gegnerischen). Dreht sich weich in die neue Richtung. */
+.facing-marker {
+  pointer-events: none;
+  stroke: #ffffff;
+  stroke-width: 1;
+  stroke-linejoin: round;
+  /* gleiche Dauer wie .unit, damit das Dreieck beim Laufen synchron mit dem
+     Chip mitzieht (setMoveDuration ueberschreibt sie phasenweise). Reine
+     Drehungen am Takt-Ende nutzen ebenfalls diese Transition. */
+  transition: transform 0.7s ease;
+}
+.facing-blue { fill: #2b4fa0; }
+.facing-red  { fill: #a02b2b; }
+/* Vorschau am Ziel-Ghost waehrend der Planung: gedaempft. */
+.facing-ghost { opacity: 0.55; transition: none; }
+
+/* Sechs Pfeile zur Wahl der Start-Blickrichtung beim Platzieren eines Reiters. */
+.placement-facing-arrow {
+  fill: #ffb200;
+  stroke: #7a5300;
+  stroke-width: 1;
+  stroke-linejoin: round;
+  cursor: pointer;
+}
+.placement-facing-arrow:hover {
+  fill: #ffd24d;
 }
 
 /* HP-Balken: zeigt direkt oberhalb eines beschaedigten Bataillon-Chips ein
@@ -157,7 +258,250 @@ body {
 #joinArea input {
   font-size: 16px;
   padding: 6px;
+  margin: 3px;
+  width: 240px;
+  max-width: 80vw;
 }
+#joinArea button {
+  margin-top: 4px;
+}
+
+/* ---------- Punkte-Anzeige ueber dem Spielfeld ---------- */
+.score-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  background: #ececed;
+  border: 1px solid #cfcfd3;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.score-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 0;
+}
+.score-side-right {
+  justify-content: flex-end;
+}
+.score-name {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#scoreNameBlue { color: #2b4fa0; }
+#scoreNameRed  { color: #a02b2b; }
+.score-round {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #666;
+  font-weight: 600;
+}
+.score-dots {
+  display: inline-flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.score-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid #9a9aa0;
+  background: #fff;
+  box-sizing: border-box;
+}
+.score-dot.score-dot-won {
+  background: #3fbf4a;
+  border-color: #2a8f33;
+}
+
+/* ---------- Runden-Banner (kurz nach einer entschiedenen Runde) ---------- */
+.round-banner {
+  position: fixed;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 14px 26px;
+  background: rgba(20, 20, 24, 0.92);
+  color: #fff;
+  font-size: 20px;
+  font-weight: 700;
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- Sieg-Overlay ---------- */
+.victory-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 15, 20, 0.72);
+}
+.victory-box {
+  background: #fff;
+  border-radius: 16px;
+  padding: 28px 40px;
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+  max-width: 90vw;
+}
+.victory-title {
+  font-size: 22px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #777;
+  font-weight: 700;
+}
+.victory-name {
+  font-size: 32px;
+  font-weight: 800;
+  margin: 8px 0 12px;
+  color: #1f7a5a;
+  word-break: break-word;
+}
+.victory-sub {
+  font-size: 14px;
+  color: #555;
+}
+
+/* ---------- Spielanleitung ---------- */
+.link-button {
+  background: none;
+  border: none;
+  color: #3366cc;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px;
+  margin-top: 2px;
+}
+.manual-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  background: rgba(15, 15, 20, 0.72);
+  padding: 20px 12px;
+  overflow-y: auto;
+}
+.manual-box {
+  position: relative;
+  background: #fff;
+  border-radius: 14px;
+  max-width: 720px;
+  width: 100%;
+  padding: 20px 22px 28px;
+  box-shadow: 0 12px 44px rgba(0, 0, 0, 0.4);
+}
+.manual-close {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  border: none;
+  background: none;
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+  color: #666;
+}
+.manual-content h2 {
+  font-size: 20px;
+  margin: 20px 0 8px;
+  border-bottom: 2px solid #e3e3e3;
+  padding-bottom: 3px;
+}
+.manual-content h2:first-child { margin-top: 0; }
+.manual-content h3 { font-size: 16px; margin: 12px 0 4px; }
+.manual-content p { font-size: 14px; line-height: 1.5; margin: 4px 0; }
+.manual-content ul { font-size: 14px; line-height: 1.5; margin: 4px 0; padding-left: 20px; }
+
+.manual-table-wrap { overflow-x: auto; }
+.manual-dmg-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 6px 0 4px;
+}
+.manual-dmg-table th,
+.manual-dmg-table td {
+  border: 1px solid #bbb;
+  padding: 5px 9px;
+  text-align: center;
+  white-space: nowrap;
+}
+.manual-dmg-table thead th,
+.manual-dmg-table tbody th { background: #eee; }
+.manual-dmg-corner { font-size: 11px; font-weight: 600; color: #555; }
+.manual-dmg-zero { color: #999; }
+.manual-note { font-size: 12px; color: #666; margin: 2px 0 10px; }
+
+.manual-unit {
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 10px 14px 12px;
+  margin: 10px 0;
+}
+.manual-unit h3 { margin-top: 0; }
+.manual-diagrams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0 4px;
+}
+.manual-figure { text-align: center; font-size: 11px; color: #555; width: 128px; }
+.manual-hex { width: 128px; height: auto; display: block; margin-bottom: 2px; }
+.manual-hex-cell { fill: #fff; stroke: #9a9a9a; stroke-width: 1.2; }
+.manual-hex-cell.hl-center { fill: #ffe08a; }
+.manual-hex-cell.hl-reach { fill: #b7e2ad; }
+.manual-hex-cell.hl-far { fill: #cbb3ec; }
+.manual-hex-cell.hl-near { fill: #e2d4f6; }
+.manual-hex-chip { stroke-width: 2; }
+.manual-hex-chip-blue { fill: #6d93e0; stroke: #3366cc; }
+.manual-hex-chip-red { fill: #e08a8a; stroke: #cc3333; }
+.manual-hex-chip-label {
+  fill: #fff;
+  font-size: 15px;
+  font-weight: bold;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+.manual-hex-facing { fill: #2b4fa0; stroke: #fff; stroke-width: 0.6; }
+.manual-hex-arrow { stroke: #7a4a10; stroke-width: 3; stroke-dasharray: 4 3; }
+
+.manual-legend {
+  font-size: 12px;
+  color: #555;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0 2px;
+}
+.manual-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1px solid #999;
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+.manual-legend .lg-center::before { background: #ffe08a; }
+.manual-legend .lg-reach::before { background: #b7e2ad; }
+.manual-legend .lg-far::before { background: #cbb3ec; }
+.manual-legend .lg-near::before { background: #e2d4f6; }
+
 #joinArea button {
   font-size: 16px;
   padding: 6px 12px;
@@ -193,22 +537,28 @@ body {
   cursor: not-allowed;
   opacity: 0.6;
 }
+/* Die Takt-Zaehlung belegt KEINE eigene Hoehe mehr: sie liegt als Overlay
+   exakt ueber der Takt-Tabelle (.plan-table-slot ist ihr Bezugsrahmen) und
+   wird nur waehrend der Rundenwiedergabe eingeblendet. Der Rest des
+   Plan-Panels ist dann ohnehin unsichtbar (plan-panel-invisible), daher
+   ueberdeckt der opake Hintergrund sauber die dahinterliegende Tabelle. */
 #tickDisplay {
-  flex: 0 0 auto;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 20px;
   font-weight: bold;
   color: #333;
   text-align: center;
-  padding: 8px 12px;
   background: #ffe08a;
   border: 1px solid #e0b34d;
   border-radius: 8px;
-}
-/* Bleibt (wie .plan-panel-invisible) permanent im Layout, nur unsichtbar,
-   damit das Spielfeld beim Ein-/Ausblenden zwischen den Runden nicht die
-   Groesse aendert. */
-.tick-display-invisible {
   visibility: hidden;
+}
+#tickDisplay.tick-visible {
+  visibility: visible;
 }
 
 #boardArea {
@@ -238,12 +588,11 @@ body {
 .plan-panel-invisible {
   visibility: hidden;
 }
-.plan-unit-label {
-  font-size: 14px;
-  font-weight: bold;
-  color: #333;
-  margin-bottom: 2px;
-  text-align: center;
+/* Bezugsrahmen fuer das #tickDisplay-Overlay: dessen Hoehe = Hoehe der
+   Takt-Tabelle, damit die Takt-Zaehlung exakt an der Tabellen-Position
+   erscheint. */
+.plan-table-slot {
+  position: relative;
 }
 .plan-panel table {
   border-collapse: collapse;
@@ -252,9 +601,9 @@ body {
 }
 .plan-panel th, .plan-panel td {
   border: 2px solid #888;
-  padding: 8px 2px;
+  padding: 3px 2px;
   text-align: center;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
 }
 .plan-panel th {
@@ -276,49 +625,54 @@ body {
   color: #6a3fb0;
   font-weight: bold;
 }
+.turn-cell {
+  color: #1f7a5a;
+  font-weight: bold;
+}
+.intercept-cell {
+  color: #b5741f;
+  font-weight: bold;
+}
 
-/* Plan-Tabelle + Schuss-Nebentabelle nebeneinander */
-.plan-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: flex-start;
-}
-.plan-row #planTable {
-  flex: 1 1 auto;
-}
-.shot-info-table {
+/* Bereich unter der Takt-Tabelle fuer den Bogenschuetzen: Wappen + die zwei
+   Schuss-Buttons. Nimmt IMMER dieselbe Hoehe ein (auch wenn keine
+   Schuetzen-Einheit gewaehlt ist oder noch kein Schuss geplant wurde) -
+   .is-hidden blendet nur den Inhalt aus (visibility), nie den Platz, damit
+   das Spielfeld konstant gross bleibt. */
+.shot-area {
   flex: 0 0 auto;
-  border-collapse: collapse;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  margin-top: 6px;
 }
-.shot-info-table th,
-.shot-info-table td {
-  border: 1px solid #b0a0d0;
-  padding: 3px 7px;
-  font-size: 12px;
-  text-align: left;
-}
-.shot-info-table th {
-  background: #efe9f7;
-  color: #4a2f80;
-  font-weight: 600;
+.shot-area.is-hidden {
+  visibility: hidden;
 }
 
 .shot-controls {
+  flex: 1 1 auto;
   display: flex;
+  flex-direction: row;
   gap: 8px;
-  margin-top: 6px;
 }
 .shot-controls button {
-  flex: 1;
+  flex: 1 1 0;
   font-size: 13px;
-  padding: 7px 8px;
+  line-height: 1.2;
+  padding: 8px 4px;
   cursor: pointer;
   border: 1px solid #9a7fd0;
   border-radius: 6px;
   background: #f3eefb;
   color: #4a2f80;
+  font-weight: 600;
+}
+.shot-controls button small {
+  display: block;
+  font-weight: 400;
+  opacity: 0.7;
 }
 .shot-controls button:disabled {
   opacity: 0.45;
@@ -328,6 +682,136 @@ body {
   background: #6a3fb0;
   color: #fff;
   border-color: #4a2f80;
+}
+
+/* Reiter: Dreh-Button - liegt im selben reservierten Bereich wie die
+   Schuss-Buttons (immer nur eines von beiden sichtbar). */
+.turn-controls {
+  flex: 1 1 auto;
+  display: flex;
+}
+.turn-controls button {
+  flex: 1 1 0;
+  font-size: 14px;
+  line-height: 1.2;
+  padding: 10px 8px;
+  cursor: pointer;
+  border: 1px solid #3f9a7f;
+  border-radius: 6px;
+  background: #eafaf4;
+  color: #1f5a46;
+  font-weight: 600;
+}
+.turn-controls button small {
+  display: block;
+  font-weight: 400;
+  opacity: 0.7;
+}
+.turn-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.turn-controls button.arming {
+  background: #1f7a5a;
+  color: #fff;
+  border-color: #14503b;
+}
+
+/* Schwert/Lanze: Abfangen-Button - selber reservierter Bereich wie Schuss/Dreh. */
+.intercept-controls {
+  flex: 1 1 auto;
+  display: flex;
+}
+.intercept-controls button {
+  flex: 1 1 0;
+  font-size: 14px;
+  line-height: 1.2;
+  padding: 10px 8px;
+  cursor: pointer;
+  border: 1px solid #b5741f;
+  border-radius: 6px;
+  background: #fcf1e2;
+  color: #7a4a10;
+  font-weight: 600;
+}
+.intercept-controls button small {
+  display: block;
+  font-weight: 400;
+  opacity: 0.7;
+}
+.intercept-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.intercept-controls button.arming {
+  background: #b5741f;
+  color: #fff;
+  border-color: #7a4a10;
+}
+
+/* Wappen: zeigt Ziel + Ankunft-Takt des geplanten Schusses. .is-hidden haelt
+   die Breite frei (die Buttons daneben bleiben gleich breit), zeigt aber
+   nichts an, solange kein Schuss geplant ist. */
+/* Wappenform: breiter, nur leicht angespitzter Fuss (mehrere Stuetzpunkte am
+   unteren Rand statt einer scharfen Spitze). */
+.shot-crest {
+  flex: 0 0 auto;
+  width: 118px;
+  height: 66px;
+  box-sizing: border-box;
+  padding: 3px;
+  background: #6a3fb0;
+  clip-path: polygon(0% 0%, 100% 0%, 100% 66%, 82% 90%, 50% 100%, 18% 90%, 0% 66%);
+}
+.shot-crest.is-hidden {
+  visibility: hidden;
+}
+.shot-crest-inner {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 3px 6px 9px;
+  background: linear-gradient(#f6f2fc, #e4d8f4);
+  clip-path: polygon(0% 0%, 100% 0%, 100% 66%, 82% 90%, 50% 100%, 18% 90%, 0% 66%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+}
+/* Kopfzeile im Wappen: Kuerzel (WS/NS) links, daneben das Ziel-Feld. */
+.shot-crest-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.shot-crest-badge {
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  background: #6a3fb0;
+  border-radius: 4px;
+  padding: 1px 5px;
+  letter-spacing: 0.04em;
+}
+.shot-crest-field {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.1;
+}
+.shot-crest-key {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #7a5fb0;
+  font-weight: 700;
+}
+.shot-crest-val {
+  font-size: 12px;
+  font-weight: 700;
+  color: #3a2568;
 }
 
 .setup-panel {

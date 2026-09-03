@@ -117,11 +117,32 @@ const HexBoard = (function () {
     return points.map(p => p.join(',')).join(' ');
   }
 
-  // Die 6 Nachbar-Richtungen in Axial-Koordinaten
+  // Die 6 Nachbar-Richtungen in Axial-Koordinaten. Aufeinanderfolgende Indizes
+  // sind auch raeumlich benachbart (je 60 Grad), der Ring schliesst sich von
+  // Index 5 zurueck zu 0 - so ist "Blickrichtung + 1" / "- 1" einfach der
+  // Nachbar-Sechstel-Sektor (fuer die Reiter-Frontbogen-Regel).
   const DIRECTIONS = [
     { dq: 1, dr: 0 }, { dq: 1, dr: -1 }, { dq: 0, dr: -1 },
     { dq: -1, dr: 0 }, { dq: -1, dr: 1 }, { dq: 0, dr: 1 }
   ];
+
+  // Index (0..5) der Richtung (dq,dr) in DIRECTIONS, oder -1 wenn kein
+  // Einheits-Schritt.
+  function dirIndexOf(dq, dr) {
+    return DIRECTIONS.findIndex(d => d.dq === dq && d.dr === dr);
+  }
+
+  // Richtungs-Index von Feld `from` zu direkt benachbartem Feld `to` (sonst -1).
+  function dirBetween(from, to) {
+    return dirIndexOf(to.q - from.q, to.r - from.r);
+  }
+
+  // Die drei erlaubten Bewegungs-Richtungen bei Blickrichtung `facing` (0..5):
+  // geradeaus plus die beiden 60-Grad-Nachbarn.
+  function frontArc(facing) {
+    const f = ((facing % 6) + 6) % 6;
+    return [(f + 5) % 6, f, (f + 1) % 6];
+  }
 
   function hexDistance(a, b) {
     const dq = a.q - b.q;
@@ -289,10 +310,13 @@ const HexBoard = (function () {
       appendLabelHex(svgElement, cx, cy, cell.row, isDark ? 'label-dark' : 'label-light');
     });
 
-    // Spalten-Buchstaben, alle auf einer gemeinsamen Höhe
+    // Spalten-Buchstaben, alle auf einer gemeinsamen Höhe. Der Abstand ist
+    // bewusst kleiner als eine volle Raster-Reihe (HEX_SIZE * sqrt(3) ~ 1.73),
+    // damit die Buchstaben dicht unter dem Brett sitzen und die viewBox (an den
+    // Inhalt angepasst) weniger Leerraum bekommt -> mehr Platz fuers Brett.
     let maxCy = -Infinity;
     screenCells.forEach(cell => { if (cell.cy > maxCy) maxCy = cell.cy; });
-    const letterCy = maxCy + HEX_SIZE * Math.sqrt(3);
+    const letterCy = maxCy + HEX_SIZE * 1.38;
 
     const xByCol = {};
     screenCells.forEach(cell => { xByCol[cell.q] = cell.cx; });
@@ -338,6 +362,9 @@ const HexBoard = (function () {
     BOARD_RADIUS,
     COL_RADIUS,
     DIRECTIONS,
+    dirIndexOf,
+    dirBetween,
+    frontArc,
     qFromCol,
     colFromQ,
     rFromRow,

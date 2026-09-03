@@ -10,34 +10,66 @@
 
   <div id="joinArea">
     <input id="roomInput" placeholder="Raum-Name (z.B. abc123)" />
+    <input id="nameInput" placeholder="Dein Name (optional)" maxlength="20" autocomplete="off" />
     <button id="joinButton">Beitreten / Erstellen</button>
+    <button id="manualButton" type="button" class="link-button">Spielanleitung ansehen</button>
   </div>
 
   <div id="status" class="hidden"></div>
 
   <div id="gameArea" class="hidden">
+    <div id="scoreBar" class="score-bar hidden">
+      <div class="score-side">
+        <span class="score-name" id="scoreNameBlue">Spieler Blau</span>
+        <span class="score-dots" id="scoreDotsBlue"></span>
+      </div>
+      <div class="score-round" id="scoreRound">Runde 1</div>
+      <div class="score-side score-side-right">
+        <span class="score-dots" id="scoreDotsRed"></span>
+        <span class="score-name" id="scoreNameRed">Spieler Rot</span>
+      </div>
+    </div>
+
     <div id="boardArea">
       <svg id="board" viewBox="0 0 428 469" preserveAspectRatio="xMidYMid meet"></svg>
 
       <div id="planPanel" class="plan-panel hidden">
-        <div id="planUnitLabel" class="plan-unit-label"></div>
-        <div class="plan-row">
+        <div id="planTableSlot" class="plan-table-slot">
           <table id="planTable">
             <thead><tr></tr></thead>
             <tbody><tr></tr></tbody>
           </table>
-          <table id="shotInfoTable" class="shot-info-table hidden">
-            <tbody></tbody>
-          </table>
+          <div id="tickDisplay"></div>
         </div>
-        <div id="shotControls" class="shot-controls hidden">
-          <button id="farShotButton" type="button">Weitschuss (3 Takte)</button>
-          <button id="nearShotButton" type="button">Nahschuss (2 Takte)</button>
+        <div id="shotArea" class="shot-area is-hidden">
+          <div id="shotCrest" class="shot-crest is-hidden">
+            <div class="shot-crest-inner">
+              <div class="shot-crest-top">
+                <span id="shotCrestType" class="shot-crest-badge">WS</span>
+                <span class="shot-crest-field">
+                  <span class="shot-crest-key">Ziel</span>
+                  <span id="shotCrestTarget" class="shot-crest-val">–</span>
+                </span>
+              </div>
+              <div class="shot-crest-field shot-crest-bottom">
+                <span class="shot-crest-key">Ankunft</span>
+                <span id="shotCrestArrival" class="shot-crest-val">Takt –</span>
+              </div>
+            </div>
+          </div>
+          <div id="shotControls" class="shot-controls">
+            <button id="farShotButton" type="button">Weitschuss <small>3 Takte</small></button>
+            <button id="nearShotButton" type="button">Nahschuss <small>2 Takte</small></button>
+          </div>
+          <div id="turnControls" class="turn-controls hidden">
+            <button id="turnButton" type="button">Drehen <small>1 Takt</small></button>
+          </div>
+          <div id="interceptControls" class="intercept-controls hidden">
+            <button id="interceptButton" type="button">Abfangen <small>1 Bewegung</small></button>
+          </div>
         </div>
       </div>
     </div>
-
-    <div id="tickDisplay" class="tick-display-invisible"></div>
 
     <div id="setupPanel" class="setup-panel hidden">
       <div id="setupCounter" class="setup-counter"></div>
@@ -51,6 +83,23 @@
     <div id="sideControls" class="hidden">
       <button id="confirmButton">Züge bestätigen</button>
       <button id="editButton" class="hidden">Zug bearbeiten</button>
+    </div>
+  </div>
+
+  <div id="manualOverlay" class="manual-overlay hidden">
+    <div class="manual-box">
+      <button id="manualClose" class="manual-close" type="button" aria-label="Schließen">×</button>
+      <div id="manualContent" class="manual-content"></div>
+    </div>
+  </div>
+
+  <div id="roundBanner" class="round-banner hidden"></div>
+
+  <div id="victoryOverlay" class="victory-overlay hidden">
+    <div class="victory-box">
+      <div class="victory-title">Sieg</div>
+      <div class="victory-name" id="victoryName"></div>
+      <div class="victory-sub">Der Raum schließt in <span id="victoryCountdown">5</span>s…</div>
     </div>
   </div>
 

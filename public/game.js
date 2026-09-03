@@ -15,16 +15,33 @@ const statusEl = document.getElementById('status');
 const gameAreaEl = document.getElementById('gameArea');
 const joinButton = document.getElementById('joinButton');
 const roomInput = document.getElementById('roomInput');
+const nameInput = document.getElementById('nameInput');
 const joinAreaEl = document.getElementById('joinArea');
+const scoreBar = document.getElementById('scoreBar');
+const scoreNameBlue = document.getElementById('scoreNameBlue');
+const scoreNameRed = document.getElementById('scoreNameRed');
+const scoreDotsBlue = document.getElementById('scoreDotsBlue');
+const scoreDotsRed = document.getElementById('scoreDotsRed');
+const scoreRound = document.getElementById('scoreRound');
+const roundBanner = document.getElementById('roundBanner');
+const victoryOverlay = document.getElementById('victoryOverlay');
+const victoryName = document.getElementById('victoryName');
+const victoryCountdown = document.getElementById('victoryCountdown');
 const planPanel = document.getElementById('planPanel');
-const planUnitLabel = document.getElementById('planUnitLabel');
 const planHeadRow = document.querySelector('#planTable thead tr');
 const planBodyRow = document.querySelector('#planTable tbody tr');
+const shotArea = document.getElementById('shotArea');
 const shotControls = document.getElementById('shotControls');
 const farShotButton = document.getElementById('farShotButton');
 const nearShotButton = document.getElementById('nearShotButton');
-const shotInfoTable = document.getElementById('shotInfoTable');
-const shotInfoBody = document.querySelector('#shotInfoTable tbody');
+const shotCrest = document.getElementById('shotCrest');
+const shotCrestType = document.getElementById('shotCrestType');
+const shotCrestTarget = document.getElementById('shotCrestTarget');
+const shotCrestArrival = document.getElementById('shotCrestArrival');
+const turnControls = document.getElementById('turnControls');
+const turnButton = document.getElementById('turnButton');
+const interceptControls = document.getElementById('interceptControls');
+const interceptButton = document.getElementById('interceptButton');
 const confirmButton = document.getElementById('confirmButton');
 const editButton = document.getElementById('editButton');
 const tickDisplay = document.getElementById('tickDisplay');
@@ -59,6 +76,12 @@ let myPlans = {};           // unitId -> geplante Schritte, nur für EIGENE (leb
 let selectedUnitId = null;  // welche eigene Einheit wird gerade geplant
 let confirmed = false;
 let shotTargeting = null;   // 'far' | 'near' | null - Feld-/Richtungswahl fuer einen Schuss laeuft gerade
+let turnTargeting = false;  // true = Reiter waehlt gerade eine neue Blickrichtung (Dreh-Schritt)
+let interceptTargeting = false; // true = Schwert/Lanze waehlt gerade eine gegnerische Einheit zum Abfangen
+let matchScores = { blue: 0, red: 0 };
+let matchNames = { blue: 'Spieler Blau', red: 'Spieler Rot' };
+let facings = {};           // unitId -> Blickrichtung (0..5, Index in HexBoard.DIRECTIONS), nur Arten mit Blickrichtung
+let pendingReiterPlacement = null; // { q, r, chipIndex } - Reiter platziert, wartet auf Blickrichtungs-Wahl
 
 // Spieler Rot bekommt das Brett um 180° gedreht angezeigt (eigene Einheiten unten
 // im Bild), Farben bleiben aber echt (rot ist rot, blau ist blau).
@@ -116,10 +139,17 @@ const unitLayer = document.createElementNS(SVG_NS, 'g');
 svg.appendChild(unitLayer);
 const hpBarLayer = document.createElementNS(SVG_NS, 'g');
 svg.appendChild(hpBarLayer);
+// Blickrichtungs-Dreiecke (Reiter) - ueber Chips/HP-Balken, damit sie nie
+// verdeckt werden.
+const facingLayer = document.createElementNS(SVG_NS, 'g');
+svg.appendChild(facingLayer);
+// Blickrichtungs-Auswahl-Pfeile waehrend der Platzierung.
+const placementFacingLayer = document.createElementNS(SVG_NS, 'g');
+svg.appendChild(placementFacingLayer);
 // Fliegende Pfeile (Bogenschuetzen-Beschuss) - liegt ueber allem anderen.
 const arrowLayer = document.createElementNS(SVG_NS, 'g');
 svg.appendChild(arrowLayer);
-const activeArrows = {}; // eventId -> { el, fromPos, toPos, launchTick, arrivalTick, cellEls }
+const activeArrows = {}; // eventId -> { el, fromPos, toPos, angle, launchTick, arrivalTick }
 
 // ---------- Chip-Zeichnung (gemeinsam für Platzierungs-Vorschau & Spiel-Einheiten) ----------
 
@@ -164,7 +194,113 @@ function positionChipElement(el, x, y) {
   el.setAttribute('transform', `translate(${x - UNIT_CHIP_SIZE / 2}, ${y - UNIT_CHIP_SIZE / 2})`);
 }
 
+// ---------- Blickrichtung: Dreieck-Marker (Reiter) ----------
+
+// Bildschirm-Winkel (Grad) der Richtung `dirIndex` - abgeleitet aus der
+// linearen Pixel-Abbildung, daher unabhaengig von der konkreten Position, aber
+// abhaengig von der Brett-Drehung (isFlipped). 0 = rechts, +90 = unten.
+function dirScreenAngleDeg(dirIndex) {
+  const d = HexBoard.DIRECTIONS[((dirIndex % 6) + 6) % 6];
+  const o = toScreen(0, 0);
+  const p = toScreen(d.dq, d.dr);
+  return Math.atan2(p.y - o.y, p.x - o.x) * 180 / Math.PI;
+}
+
+// Dreieck, das nach +X zeigt (Spitze ein Stueck ausserhalb des Chip-Rands);
+// die echte Blickrichtung kommt ueber rotate() im transform dazu.
+const FACING_MARKER_POINTS =
+  `${CHIP_RADIUS * 2.15},0 ${CHIP_RADIUS * 1.5},${-CHIP_RADIUS * 0.5} ${CHIP_RADIUS * 1.5},${CHIP_RADIUS * 0.5}`;
+
+const facingMarkers = {}; // unitId -> <polygon>
+
+// Setzt Position + Rotation eines Blickrichtungs-Markers OHNE CSS-Transition
+// (harter "Teleport" der Ausrichtung). Danach laeuft die naechste
+// Positionsaenderung wieder animiert.
+function snapFacingMarker(unitId) {
+  const poly = facingMarkers[unitId];
+  const pos = positions[unitId];
+  if (!poly || !pos) return;
+  const prev = poly.style.transition;
+  poly.style.transition = 'none';
+  const { x, y } = toScreen(pos.q, pos.r);
+  positionFacingMarker(unitId, x, y);
+  // Reflow erzwingen, damit das folgende Zuruecksetzen der Transition nicht
+  // rueckwirkend die gerade gesetzte Rotation doch noch animiert.
+  void poly.getBoundingClientRect();
+  poly.style.transition = prev || '';
+}
+
+function createFacingMarker(unitId) {
+  const unit = unitsById[unitId];
+  if (!unit || !UnitTypes.hasFacing(unit.typeKey)) return;
+  const poly = document.createElementNS(SVG_NS, 'polygon');
+  poly.setAttribute('points', FACING_MARKER_POINTS);
+  poly.classList.add('facing-marker', `facing-${unit.role}`);
+  facingLayer.appendChild(poly);
+  facingMarkers[unitId] = poly;
+}
+
+// Naechster fortlaufender Winkel zu `targetRaw`, ausgehend von `prev` - so dass
+// die CSS-Transition IMMER den kuerzeren Weg dreht. Genau entgegengesetzt
+// (180 Grad) => im Uhrzeigersinn (+180, Bildschirm-Uhrzeigersinn = wachsender
+// Winkel, da y nach unten zeigt).
+function continuousAngle(prev, targetRaw) {
+  if (prev == null || !isFinite(prev)) return targetRaw;
+  let delta = (((targetRaw - prev) % 360) + 360) % 360; // 0..360
+  if (delta > 180) delta -= 360;                        // (-180 .. 180]
+  return prev + delta;
+}
+
+function positionFacingMarker(unitId, x, y) {
+  const poly = facingMarkers[unitId];
+  if (!poly) return;
+  const f = facings[unitId];
+  const rawDeg = (f == null) ? 0 : dirScreenAngleDeg(f);
+  const angle = continuousAngle(poly._facingAngle, rawDeg);
+  poly._facingAngle = angle;
+  poly.setAttribute('transform', `translate(${x}, ${y}) rotate(${angle})`);
+}
+
+function removeFacingMarker(unitId) {
+  const poly = facingMarkers[unitId];
+  if (poly) poly.remove();
+  delete facingMarkers[unitId];
+}
+
+// Alle Blickrichtungs-Marker an die aktuelle Chip-Position + gespeicherte
+// Blickrichtung setzen (nach einem Takt-Wechsel in der Wiedergabe).
+function refreshFacingMarkers() {
+  Object.keys(facingMarkers).forEach(unitId => {
+    const pos = positions[unitId];
+    if (!pos) return;
+    const { x, y } = toScreen(pos.q, pos.r);
+    positionFacingMarker(unitId, x, y);
+  });
+}
+
+// 8-Wege-Pfeilglyphen fuer die Takt-Tabelle (Bildschirm-Ausrichtung eines
+// Dreh-Schritts). 0 = rechts, im Uhrzeigersinn.
+const ARROW_GLYPHS = ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗'];
+function screenArrowGlyph(dirIndex) {
+  const a = ((dirScreenAngleDeg(dirIndex) % 360) + 360) % 360;
+  return ARROW_GLYPHS[Math.round(a / 45) % 8];
+}
+
 // ---------- Raum beitreten ----------
+
+// Buchstaben (inkl. Umlaute/Akzente), Ziffern, Leerzeichen, gaengige
+// Satzzeichen; insgesamt hoechstens 20 Zeichen. Muss zur serverseitigen
+// sanitizeName passen.
+function sanitizeNameClient(value) {
+  return String(value || '')
+    .replace(/[^A-Za-z0-9À-ſ .,!?'"()@#&+\-_/:;]/g, '')
+    .slice(0, 20);
+}
+
+nameInput.addEventListener('input', () => {
+  const clean = sanitizeNameClient(nameInput.value);
+  if (clean !== nameInput.value) nameInput.value = clean;
+});
 
 joinButton.addEventListener('click', () => {
   const roomId = roomInput.value.trim();
@@ -172,17 +308,335 @@ joinButton.addEventListener('click', () => {
     alert('Bitte einen Raum-Namen eingeben');
     return;
   }
+  const name = sanitizeNameClient(nameInput.value).trim();
   myRoomId = roomId;
-  socket.emit('joinRoom', roomId);
+  socket.emit('joinRoom', { roomId, name });
 });
 
-roomInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') {
-    joinButton.click();
+[roomInput, nameInput].forEach(el => {
+  el.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') joinButton.click();
+  });
+});
+
+// ---------- Punkte-Anzeige (Match ueber mehrere Runden) ----------
+
+function renderScoreDots(container, filled) {
+  container.innerHTML = '';
+  for (let i = 0; i < 2; i++) {
+    const dot = document.createElement('span');
+    dot.className = 'score-dot' + (i < filled ? ' score-dot-won' : '');
+    container.appendChild(dot);
+  }
+}
+
+function renderScoreBar() {
+  scoreNameBlue.textContent = matchNames.blue;
+  scoreNameRed.textContent = matchNames.red;
+  renderScoreDots(scoreDotsBlue, matchScores.blue || 0);
+  renderScoreDots(scoreDotsRed, matchScores.red || 0);
+}
+
+function setMatchState(match) {
+  if (!match) return;
+  if (match.scores) matchScores = match.scores;
+  if (match.names) matchNames = match.names;
+  if (match.round != null) scoreRound.textContent = `Runde ${match.round}`;
+  renderScoreBar();
+}
+
+// ---------- Spielanleitung (Startbildschirm) ----------
+
+const manualButton = document.getElementById('manualButton');
+const manualOverlay = document.getElementById('manualOverlay');
+const manualContent = document.getElementById('manualContent');
+const manualClose = document.getElementById('manualClose');
+let manualBuilt = false;
+
+manualButton.addEventListener('click', () => {
+  if (!manualBuilt) { buildManual(); manualBuilt = true; }
+  manualOverlay.classList.remove('hidden');
+});
+manualClose.addEventListener('click', () => manualOverlay.classList.add('hidden'));
+manualOverlay.addEventListener('click', (e) => {
+  if (e.target === manualOverlay) manualOverlay.classList.add('hidden');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !manualOverlay.classList.contains('hidden')) {
+    manualOverlay.classList.add('hidden');
   }
 });
 
-socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits }) => {
+function mEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+// Kleines schematisches Hex-Feld (gleiche Ausrichtung wie das echte Brett).
+// spec: { radius, highlights:{'q,r':'hl-*'}, chips:[{q,r,role,label}],
+//         facing:{q,r,dir}, arrows:[{from:{q,r},to:{q,r}}] }
+function miniHex(spec) {
+  const S = 20;
+  const rad = spec.radius || 2;
+  const px = (q, r) => ({ x: 1.5 * S * q, y: Math.sqrt(3) * S * (r + q / 2) });
+  const corners = (cx, cy) => {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+      const a = Math.PI / 180 * (60 * i);
+      pts.push(`${(cx + S * Math.cos(a)).toFixed(2)},${(cy + S * Math.sin(a)).toFixed(2)}`);
+    }
+    return pts.join(' ');
+  };
+
+  const cells = [];
+  for (let q = -rad; q <= rad; q++) {
+    for (let r = -rad; r <= rad; r++) {
+      if (Math.abs(q + r) > rad) continue;
+      cells.push({ q, r });
+    }
+  }
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  cells.forEach(c => {
+    const p = px(c.q, c.r);
+    minX = Math.min(minX, p.x - S); maxX = Math.max(maxX, p.x + S);
+    minY = Math.min(minY, p.y - S); maxY = Math.max(maxY, p.y + S);
+  });
+  const pad = 4;
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.classList.add('manual-hex');
+  svg.setAttribute('viewBox', `${minX - pad} ${minY - pad} ${maxX - minX + 2 * pad} ${maxY - minY + 2 * pad}`);
+
+  cells.forEach(c => {
+    const p = px(c.q, c.r);
+    const poly = document.createElementNS(SVG_NS, 'polygon');
+    poly.setAttribute('points', corners(p.x, p.y));
+    poly.classList.add('manual-hex-cell');
+    const hl = spec.highlights && spec.highlights[`${c.q},${c.r}`];
+    if (hl) poly.classList.add(hl);
+    svg.appendChild(poly);
+  });
+
+  (spec.arrows || []).forEach(ar => {
+    const a = px(ar.from.q, ar.from.r);
+    const b = px(ar.to.q, ar.to.r);
+    const ln = document.createElementNS(SVG_NS, 'line');
+    ln.setAttribute('x1', a.x); ln.setAttribute('y1', a.y);
+    ln.setAttribute('x2', b.x); ln.setAttribute('y2', b.y);
+    ln.classList.add('manual-hex-arrow');
+    svg.appendChild(ln);
+  });
+
+  (spec.chips || []).forEach(ch => {
+    const p = px(ch.q, ch.r);
+    const circ = document.createElementNS(SVG_NS, 'circle');
+    circ.setAttribute('cx', p.x); circ.setAttribute('cy', p.y);
+    circ.setAttribute('r', S * 0.58);
+    circ.classList.add('manual-hex-chip', `manual-hex-chip-${ch.role}`);
+    svg.appendChild(circ);
+    if (ch.label) {
+      const t = document.createElementNS(SVG_NS, 'text');
+      t.setAttribute('x', p.x); t.setAttribute('y', p.y);
+      t.classList.add('manual-hex-chip-label');
+      t.textContent = ch.label;
+      svg.appendChild(t);
+    }
+  });
+
+  if (spec.facing) {
+    const p = px(spec.facing.q, spec.facing.r);
+    const d = HexBoard.DIRECTIONS[spec.facing.dir];
+    const n = px(spec.facing.q + d.dq, spec.facing.r + d.dr);
+    const ang = Math.atan2(n.y - p.y, n.x - p.x) * 180 / Math.PI;
+    const tri = document.createElementNS(SVG_NS, 'polygon');
+    tri.setAttribute('points', `${S * 1.15},0 ${S * 0.5},${-S * 0.42} ${S * 0.5},${S * 0.42}`);
+    tri.setAttribute('transform', `translate(${p.x}, ${p.y}) rotate(${ang})`);
+    tri.classList.add('manual-hex-facing');
+    svg.appendChild(tri);
+  }
+
+  return svg;
+}
+
+function figure(svg, caption) {
+  const fig = mEl('div', 'manual-figure');
+  fig.appendChild(svg);
+  fig.appendChild(document.createTextNode(caption));
+  return fig;
+}
+
+// Nachbar-Zellen des Ursprungs als "erreichbar" markieren.
+const RING1 = {};
+HexBoard.DIRECTIONS.forEach(d => { RING1[`${d.dq},${d.dr}`] = 'hl-reach'; });
+
+function buildDamageTable() {
+  const order = ['reiter', 'schwertkaempfer', 'lanze', 'bogenschuetze'];
+  const wrap = mEl('div', 'manual-table-wrap');
+  const table = mEl('table', 'manual-dmg-table');
+
+  const thead = mEl('thead');
+  const hr = mEl('tr');
+  hr.appendChild(mEl('th', 'manual-dmg-corner', 'Angreifer \\ Ziel'));
+  order.forEach(k => hr.appendChild(mEl('th', null, UnitTypes.byKey(k).label)));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tb = mEl('tbody');
+  order.forEach(a => {
+    const tr = mEl('tr');
+    tr.appendChild(mEl('th', null, UnitTypes.byKey(a).label));
+    order.forEach(d => {
+      const v = UnitTypes.byKey(a).damage[d];
+      tr.appendChild(mEl('td', v === 0 ? 'manual-dmg-zero' : null, String(v)));
+    });
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function buildRangedTable() {
+  const bow = UnitTypes.byKey('bogenschuetze');
+  const wrap = mEl('div', 'manual-table-wrap');
+  const table = mEl('table', 'manual-dmg-table');
+  const hr = mEl('tr');
+  hr.appendChild(mEl('th', null, 'Beschuss-Ziel'));
+  hr.appendChild(mEl('th', null, 'Schaden / Einheit'));
+  table.appendChild(hr);
+  ['lanze', 'reiter', 'schwertkaempfer', 'bogenschuetze'].forEach(k => {
+    const tr = mEl('tr');
+    tr.appendChild(mEl('th', null, UnitTypes.byKey(k).label));
+    tr.appendChild(mEl('td', null, String(bow.rangedDamage[k])));
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+  return wrap;
+}
+
+const MANUAL_UNITS = [
+  {
+    key: 'reiter',
+    move: 'Bis zu 4 Felder pro Runde – aber nur in den Front-Bogen der Blickrichtung: geradeaus und die beiden 60°-Nachbarn (3 Felder). Nach jedem Schritt zeigt „vorne" in die gelaufene Richtung. Der Button „Drehen" (kostet 1 Takt) richtet ihn in jede beliebige Richtung neu aus. Die Start-Blickrichtung wird beim Platzieren gewählt und als Dreieck angezeigt.',
+    attack: 'Nur Nahkampf. Stark gegen Bogenschütze (10) und Schwertkämpfer (9), schwach gegen die Lanze (4).',
+    diagrams: () => [
+      figure(miniHex({
+        radius: 1,
+        highlights: { '0,0': 'hl-center', '1,-1': 'hl-reach', '0,-1': 'hl-reach', '-1,0': 'hl-reach' },
+        chips: [{ q: 0, r: 0, role: 'blue' }],
+        facing: { q: 0, r: 0, dir: 2 }
+      }), 'Front-Bogen: nur die 3 Felder vor der Blickrichtung')
+    ]
+  },
+  {
+    key: 'schwertkaempfer',
+    move: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen.',
+    attack: 'Nahkampf, ausgeglichen; besonders gut gegen Bogenschütze (9) und Lanze (9). Zusätzlich der Button „Abfangen": statt ein Feld zu wählen, wird eine gegnerische Einheit als Ziel bestimmt – die Figur läuft ihr im Ausführungstakt automatisch entgegen bzw. in den Weg (das kürzeste Feld zum Zielfeld des Gegners). Das zählt als eine Bewegung; Abfänger ziehen im Takt erst nach allen anderen.',
+    diagrams: () => [
+      figure(miniHex({
+        radius: 1,
+        highlights: Object.assign({ '0,0': 'hl-center' }, RING1),
+        chips: [{ q: 0, r: 0, role: 'blue' }]
+      }), 'Bewegung: alle 6 Nachbarfelder (bis zu 2× pro Runde)'),
+      figure(miniHex({
+        radius: 3,
+        highlights: { '-2,2': 'hl-center' },
+        chips: [{ q: -2, r: 2, role: 'blue' }, { q: 2, r: -2, role: 'red', label: '?' }],
+        arrows: [{ from: { q: -2, r: 2 }, to: { q: 2, r: -2 } }]
+      }), 'Abfangen: läuft dem gewählten Gegner entgegen')
+    ]
+  },
+  {
+    key: 'lanze',
+    move: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen. Kann ebenfalls „Abfangen".',
+    attack: 'Nahkampf. Sehr stark gegen den Reiter (12), sonst mittel bis schwach.',
+    diagrams: () => [
+      figure(miniHex({
+        radius: 1,
+        highlights: Object.assign({ '0,0': 'hl-center' }, RING1),
+        chips: [{ q: 0, r: 0, role: 'blue' }]
+      }), 'Bewegung: alle 6 Nachbarfelder (bis zu 2× pro Runde)')
+    ]
+  },
+  {
+    key: 'bogenschuetze',
+    move: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen. Wer in dieser Runde schießt, darf höchstens 1 Feld laufen.',
+    attack: 'Im Nahkampf 0 Schaden – verliert jeden Nahkampf und verdrängt nie eine Figur. Dafür Fernkampf: Weitschuss auf ein Feld in 2–3 Feldern Entfernung (Pfeil schlägt nach 3 Takten ein) oder Nahschuss in eine Nachbar-Richtung – trifft das Nachbarfeld und das Feld dahinter (schlägt nach 2 Takten ein). Der Schaden wird beim Abschuss eingefroren.',
+    diagrams: () => {
+      const far = { '0,0': 'hl-center' };
+      const near = { '0,0': 'hl-center', '0,-1': 'hl-near', '0,-2': 'hl-near' };
+      for (let q = -3; q <= 3; q++) {
+        for (let r = -3; r <= 3; r++) {
+          if (Math.abs(q + r) > 3) continue;
+          const d = (Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2;
+          if (d >= 2 && d <= 3) far[`${q},${r}`] = 'hl-far';
+        }
+      }
+      return [
+        figure(miniHex({ radius: 3, highlights: far, chips: [{ q: 0, r: 0, role: 'blue' }] }),
+          'Weitschuss: jedes Feld in 2–3 Feldern Abstand'),
+        figure(miniHex({
+          radius: 2, highlights: near, chips: [{ q: 0, r: 0, role: 'blue' }],
+          arrows: [{ from: { q: 0, r: 0 }, to: { q: 0, r: -2 } }]
+        }), 'Nahschuss: Nachbarfeld + Feld dahinter')
+      ];
+    }
+  }
+];
+
+function buildManual() {
+  const c = manualContent;
+  c.innerHTML = '';
+
+  c.appendChild(mEl('h2', null, 'Ziel des Spiels'));
+  c.appendChild(mEl('p', null,
+    'Wer am Ende einer Runde noch Figuren auf dem Feld hat, gewinnt die Runde. Zwei Rundensiege gewinnen das Match (Best of 3). Verlieren beide Spieler in derselben Runde ihre letzten Figuren, bekommen beide einen Punkt.'));
+
+  c.appendChild(mEl('h2', null, 'Ablauf einer Runde'));
+  const ul = mEl('ul');
+  [
+    'Beide Spieler planen gleichzeitig – pro Einheit bis zu 4 Takte, jeder Takt ein Nachbarfeld oder „bleibt".',
+    'Erst wenn beide bestätigen, laufen alle Pläne Takt für Takt gleichzeitig ab.',
+    'Wollen zwei eigene Figuren aufs selbe Feld, gewinnt die „schnellere" Art: Reiter > Schwertkämpfer > Lanze > Bogenschütze.',
+    'Treffen Figuren verschiedener Spieler aufeinander, kämpfen sie. Wer kämpft, verwirkt den Rest seiner Planung für diese Runde.'
+  ].forEach(t => ul.appendChild(mEl('li', null, t)));
+  c.appendChild(ul);
+
+  c.appendChild(mEl('h2', null, 'Bataillone & Schaden'));
+  c.appendChild(mEl('p', null,
+    'Jede Figur ist ein Bataillon aus 10 Einzel-Einheiten mit gemeinsamem HP-Vorrat. HP pro Einzel-Einheit: Reiter, Schwertkämpfer, Lanze je 15 (Bataillon 150), Bogenschütze 10 (Bataillon 100).'));
+  c.appendChild(mEl('p', null,
+    'Der Kampf-Schaden ist der Tabellenwert × noch lebende Einheiten im angreifenden Bataillon (bis zu 10). Der Bogenschütze macht im Nahkampf immer 0.'));
+  c.appendChild(mEl('h3', null, 'Nahkampf-Schaden (pro Einheit)'));
+  c.appendChild(buildDamageTable());
+  c.appendChild(mEl('div', 'manual-note', 'Zeile = Angreifer, Spalte = getroffene Art. Bogenschütze-Zeile: überall 0.'));
+  c.appendChild(mEl('h3', null, 'Bogenschütze – Beschuss-Schaden (pro Einheit)'));
+  c.appendChild(buildRangedTable());
+  c.appendChild(mEl('div', 'manual-note', 'Unabhängig vom Nahkampf. Gesamtschaden = dieser Wert × beim Abschuss lebende Schützen-Einheiten.'));
+
+  c.appendChild(mEl('h2', null, 'Die Einheiten'));
+  MANUAL_UNITS.forEach(u => {
+    const box = mEl('div', 'manual-unit');
+    box.appendChild(mEl('h3', null, UnitTypes.byKey(u.key).label));
+    const diag = mEl('div', 'manual-diagrams');
+    u.diagrams().forEach(fig => diag.appendChild(fig));
+    box.appendChild(diag);
+    const mv = mEl('p'); mv.appendChild(mEl('strong', null, 'Bewegung: ')); mv.appendChild(document.createTextNode(u.move));
+    box.appendChild(mv);
+    const at = mEl('p'); at.appendChild(mEl('strong', null, 'Angriff: ')); at.appendChild(document.createTextNode(u.attack));
+    box.appendChild(at);
+    c.appendChild(box);
+  });
+
+  const legend = mEl('div', 'manual-legend');
+  [['lg-center', 'eigenes Feld'], ['lg-reach', 'erreichbar'], ['lg-far', 'Weitschuss-Ziel'], ['lg-near', 'Nahschuss']]
+    .forEach(([cls, txt]) => legend.appendChild(mEl('span', cls, txt)));
+  c.appendChild(legend);
+}
+
+socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits, match }) => {
   myRole = role;
   myUnitTypes = unitTypes || UnitTypes.TYPES;
   maxUnitsPerPlayer = maxUnits || UnitTypes.MAX_UNITS_PER_PLAYER;
@@ -193,6 +647,8 @@ socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits }) => {
   statusEl.classList.remove('hidden');
   gameAreaEl.classList.remove('hidden');
   setupPanel.classList.remove('hidden');
+  setMatchState(match || { scores: { blue: 0, red: 0 }, names: matchNames, round: 1 });
+  scoreBar.classList.remove('hidden');
   initBoard();
   highlightOwnZone();
   renderStackList();
@@ -231,15 +687,20 @@ socket.on('opponentPlacementReady', () => {
   }
 });
 
-socket.on('gameStart', ({ units, positions: serverPositions, hp: serverHp }) => {
+socket.on('gameStart', ({ units, positions: serverPositions, hp: serverHp, facings: serverFacings }) => {
   phase = 'playing';
   unitsById = {};
   units.forEach(u => { unitsById[u.id] = u; });
   positions = serverPositions;
   hp = serverHp || {};
+  facings = serverFacings ? { ...serverFacings } : {};
 
   Object.values(placementChipElements).forEach(el => el.remove());
   placementChipElements = {};
+  Object.keys(placementFacingMarkers).forEach(id => delete placementFacingMarkers[id]);
+  placementFacingLayer.innerHTML = '';
+  facingLayer.innerHTML = '';
+  pendingReiterPlacement = null;
   setupPanel.classList.add('hidden');
   clearHighlights();
   sideControls.classList.remove('hidden');
@@ -255,11 +716,7 @@ socket.on('gameStart', ({ units, positions: serverPositions, hp: serverHp }) => 
   // Tabelle nicht die Größe ändert.
   planPanel.classList.remove('hidden');
   planPanel.classList.add('plan-panel-invisible');
-  // Geschütztes Leerzeichen (U+00A0), nicht ' ' - ein reiner
-  // Whitespace-Textknoten bekommt keine Line-Box, wodurch
-  // .plan-unit-label kollabiert und sich das Spielfeld minimal
-  // in der Groesse aendert (siehe auch closePlanning()).
-  planUnitLabel.textContent = ' ';
+  renderPlanTable();
   renderPlanTable();
 
   const roleName = myRole === 'blue' ? 'Blau' : 'Rot';
@@ -279,15 +736,109 @@ socket.on('opponentConfirmed', () => {
   }
 });
 
-socket.on('executeRound', ({ ticks }) => {
+socket.on('matchState', (match) => {
+  setMatchState(match);
+});
+
+socket.on('executeRound', ({ ticks, roundResult, matchResult }) => {
   closePlanning();
   editButton.classList.add('hidden');
-  animateRound(ticks);
+  animateRound(ticks).then(async () => {
+    if (roundResult) setMatchState(roundResult); // Punktestand + Namen aktualisieren
+    if (matchResult) {
+      showVictory(matchResult);
+    } else if (roundResult) {
+      await showRoundBanner(roundResult);
+      enterPlacementAgain(roundResult.round + 1);
+    }
+  });
+});
+
+socket.on('returnToStart', () => {
+  // Sauberster Weg zurueck auf den Startbildschirm.
+  location.reload();
 });
 
 socket.on('playerLeft', () => {
   statusEl.textContent = 'Der andere Spieler hat die Verbindung getrennt.';
 });
+
+// Kurzes Banner nach einer entschiedenen Runde (kein Match-Ende).
+function showRoundBanner(roundResult) {
+  const { winner, round } = roundResult;
+  roundBanner.textContent = winner === 'draw'
+    ? `Runde ${round}: Unentschieden – beide erhalten einen Punkt`
+    : `Runde ${round} gewonnen: ${matchNames[winner]}`;
+  roundBanner.classList.remove('hidden');
+  return new Promise(resolve => {
+    setTimeout(() => {
+      roundBanner.classList.add('hidden');
+      resolve();
+    }, 2600);
+  });
+}
+
+// Match vorbei: Sieg-Overlay mit 5s-Countdown (der Server schickt danach
+// 'returnToStart').
+function showVictory({ winner, winnerName }) {
+  victoryName.textContent = winner === 'draw' ? 'Unentschieden' : (winnerName || '');
+  victoryOverlay.classList.remove('hidden');
+  let n = 5;
+  victoryCountdown.textContent = String(n);
+  const iv = setInterval(() => {
+    n -= 1;
+    victoryCountdown.textContent = String(Math.max(0, n));
+    if (n <= 0) clearInterval(iv);
+  }, 1000);
+}
+
+// Zuruecksetzen fuer die naechste Runde (Scores/Namen bleiben, alles andere
+// wird wie ein frischer Platzierungs-Start aufgebaut).
+function enterPlacementAgain(nextRound) {
+  phase = 'placement';
+  placedByType = {};
+  placementReady = false;
+  selectedUnitId = null;
+  confirmed = false;
+  shotTargeting = null;
+  turnTargeting = false;
+  interceptTargeting = false;
+  myPlans = {};
+  pendingReiterPlacement = null;
+
+  Object.keys(unitElements).forEach(id => { unitElements[id].remove(); delete unitElements[id]; });
+  Object.keys(hpBarElements).forEach(id => { hpBarElements[id].group.remove(); delete hpBarElements[id]; });
+  Object.keys(facingMarkers).forEach(id => removeFacingMarker(id));
+  Object.keys(placementFacingMarkers).forEach(id => delete placementFacingMarkers[id]);
+  Object.values(placementChipElements).forEach(el => el.remove());
+  placementChipElements = {};
+  unitsById = {};
+  positions = {};
+  hp = {};
+  facings = {};
+  pathGroup.innerHTML = '';
+  arrowLayer.innerHTML = '';
+  facingLayer.innerHTML = '';
+  placementFacingLayer.innerHTML = '';
+
+  planPanel.classList.add('hidden');
+  planPanel.classList.remove('plan-panel-invisible');
+  sideControls.classList.add('hidden');
+  editButton.classList.add('hidden');
+  confirmButton.disabled = false;
+  tickDisplay.classList.remove('tick-visible');
+  placementReadyButton.disabled = false;
+  placementReadyButton.classList.remove('hidden');
+  placementEditButton.classList.add('hidden');
+  setupPanel.classList.remove('hidden');
+
+  if (nextRound != null) scoreRound.textContent = `Runde ${nextRound}`;
+
+  initBoard();
+  highlightOwnZone();
+  renderStackList();
+  statusEl.textContent = `Runde ${nextRound}. Wähle deine Einheiten und platziere sie.`;
+}
 
 // ---------- Platzierungsphase ----------
 
@@ -366,12 +917,15 @@ function renderStackList() {
 
 function armType(typeKey) {
   if (placementReady) return;
+  if (pendingReiterPlacement) cancelPendingReiterPlacement();
   armedTypeKey = armedTypeKey === typeKey ? null : typeKey;
   renderStackList();
   highlightOwnZone();
 }
 
-function createPlacementChip(unitId, typeKey, chipIndex, q, r) {
+const placementFacingMarkers = {}; // unitId -> <polygon> (Blickrichtung platzierter Reiter, Platzierungsphase)
+
+function createPlacementChip(unitId, typeKey, chipIndex, q, r, facing) {
   const el = createChipElement(myRole, typeKey, chipIndex);
   const { x, y } = toScreen(q, r);
   positionChipElement(el, x, y);
@@ -381,6 +935,15 @@ function createPlacementChip(unitId, typeKey, chipIndex, q, r) {
   });
   unitLayer.appendChild(el);
   placementChipElements[unitId] = el;
+
+  if (UnitTypes.hasFacing(typeKey) && facing != null) {
+    const poly = document.createElementNS(SVG_NS, 'polygon');
+    poly.setAttribute('points', FACING_MARKER_POINTS);
+    poly.setAttribute('transform', `translate(${x}, ${y}) rotate(${dirScreenAngleDeg(facing)})`);
+    poly.classList.add('facing-marker', `facing-${myRole}`);
+    facingLayer.appendChild(poly);
+    placementFacingMarkers[unitId] = poly;
+  }
 }
 
 function removePlacementChip(unitId) {
@@ -389,6 +952,60 @@ function removePlacementChip(unitId) {
     el.remove();
     delete placementChipElements[unitId];
   }
+  const marker = placementFacingMarkers[unitId];
+  if (marker) {
+    marker.remove();
+    delete placementFacingMarkers[unitId];
+  }
+}
+
+// Sechs anklickbare Pfeile um das eben gewaehlte Feld - der Spieler bestimmt
+// damit die Start-Blickrichtung des Reiters.
+function showPlacementFacingChooser(q, r) {
+  clearPlacementFacingArrows();
+  const c = toScreen(q, r);
+  HexBoard.DIRECTIONS.forEach((d, i) => {
+    const n = toScreen(q + d.dq, r + d.dr);
+    const ux = n.x - c.x;
+    const uy = n.y - c.y;
+    const arrow = document.createElementNS(SVG_NS, 'polygon');
+    const M = CHIP_RADIUS;
+    arrow.setAttribute('points', `${M * 1.75},0 ${M * 0.22},${-M * 0.9} ${M * 0.22},${M * 0.9}`);
+    arrow.setAttribute('transform',
+      `translate(${c.x + ux * 0.55}, ${c.y + uy * 0.55}) rotate(${Math.atan2(uy, ux) * 180 / Math.PI})`);
+    arrow.classList.add('placement-facing-arrow');
+    arrow.addEventListener('click', (event) => {
+      event.stopPropagation();
+      finalizeReiterPlacement(i);
+    });
+    placementFacingLayer.appendChild(arrow);
+  });
+}
+
+function clearPlacementFacingArrows() {
+  placementFacingLayer.innerHTML = '';
+}
+
+function finalizeReiterPlacement(facingIndex) {
+  if (!pendingReiterPlacement) return;
+  const { q, r, chipIndex } = pendingReiterPlacement;
+  const list = placedByType['reiter'] || (placedByType['reiter'] = []);
+  const unitId = `${myRole}_reiter_${chipIndex}`;
+  list.push({ unitId, q, r, facing: facingIndex });
+  createPlacementChip(unitId, 'reiter', chipIndex, q, r, facingIndex);
+  socket.emit('placeUnit', { roomId: myRoomId, typeKey: 'reiter', q, r, facing: facingIndex });
+
+  pendingReiterPlacement = null;
+  clearPlacementFacingArrows();
+  armedTypeKey = null;
+  renderStackList();
+  highlightOwnZone();
+}
+
+function cancelPendingReiterPlacement() {
+  pendingReiterPlacement = null;
+  clearPlacementFacingArrows();
+  highlightOwnZone();
 }
 
 function handlePlacementChipClick(unitId, typeKey) {
@@ -413,7 +1030,15 @@ function handlePlacementChipClick(unitId, typeKey) {
 }
 
 function handlePlacementClick(q, r) {
-  if (!armedTypeKey || placementReady) return;
+  if (placementReady) return;
+
+  // Ein Klick aufs Brett bricht eine offene Reiter-Blickrichtungs-Wahl ab.
+  if (pendingReiterPlacement) {
+    cancelPendingReiterPlacement();
+    return;
+  }
+
+  if (!armedTypeKey) return;
   if (!isOwnZoneCell(q, r) || isOwnCellOccupied(q, r)) return;
 
   const type = UnitTypes.byKey(armedTypeKey);
@@ -421,6 +1046,15 @@ function handlePlacementClick(q, r) {
   if (list.length >= type.maxPerPlayer || totalPlacedCount() >= maxUnitsPerPlayer) return;
 
   const chipIndex = list.length + 1;
+
+  // Reiter: erst Feld waehlen, dann Blickrichtung - erst danach wird platziert.
+  if (UnitTypes.hasFacing(armedTypeKey)) {
+    pendingReiterPlacement = { q, r, chipIndex };
+    showPlacementFacingChooser(q, r);
+    statusEl.textContent = 'Reiter: Blickrichtung waehlen.';
+    return;
+  }
+
   const unitId = `${myRole}_${armedTypeKey}_${chipIndex}`;
   list.push({ unitId, q, r });
   createPlacementChip(unitId, armedTypeKey, chipIndex, q, r);
@@ -435,6 +1069,7 @@ function handlePlacementClick(q, r) {
 
 placementReadyButton.addEventListener('click', () => {
   if (placementReady || !myRoomId) return;
+  if (pendingReiterPlacement) cancelPendingReiterPlacement();
   placementReady = true;
   armedTypeKey = null;
   placementReadyButton.disabled = true;
@@ -464,6 +1099,10 @@ function createUnitChip(unit) {
   const el = createChipElement(unit.role, unit.typeKey, unit.chipIndex);
   el.addEventListener('click', (event) => {
     event.stopPropagation();
+    if (interceptTargeting && unit.role !== myRole) {
+      handleInterceptTargetClick(unit.id);
+      return;
+    }
     if (unit.role === myRole) selectUnit(unit.id);
   });
   unitLayer.appendChild(el);
@@ -550,6 +1189,7 @@ function updateHpBar(unitId) {
 function moveUnitTo(unitId, x, y) {
   positionChipElement(unitElements[unitId], x, y);
   positionHpBar(unitId, x, y);
+  positionFacingMarker(unitId, x, y);
 }
 
 function renderUnit(unitId) {
@@ -563,6 +1203,7 @@ function renderAllUnitsForPlay() {
   Object.values(unitsById).forEach(unit => {
     unitElements[unit.id] = createUnitChip(unit);
     createHpBar(unit.id);
+    createFacingMarker(unit.id);
   });
   Object.keys(positions).forEach(unitId => {
     renderUnit(unitId);
@@ -586,12 +1227,15 @@ function removeDefeatedUnit(unitId) {
     setTimeout(() => bar.group.remove(), DEFEAT_FADE_DURATION);
   }
 
+  removeFacingMarker(unitId);
+
   delete unitElements[unitId];
   delete hpBarElements[unitId];
   delete positions[unitId];
   delete hp[unitId];
   delete myPlans[unitId];
   delete unitsById[unitId];
+  delete facings[unitId];
 }
 
 // ---------- Planung (pro ausgewählter eigener Einheit) ----------
@@ -599,10 +1243,10 @@ function removeDefeatedUnit(unitId) {
 function selectUnit(unitId) {
   selectedUnitId = unitId;
   shotTargeting = null;
+  turnTargeting = false;
+  interceptTargeting = false;
+  setInterceptTargetsHighlight(false);
   planPanel.classList.remove('plan-panel-invisible');
-
-  const unit = unitsById[unitId];
-  planUnitLabel.textContent = unit.label;
 
   renderPlanTable();
   renderPath();
@@ -616,8 +1260,10 @@ function selectUnit(unitId) {
 function closePlanning() {
   selectedUnitId = null;
   shotTargeting = null;
+  turnTargeting = false;
+  interceptTargeting = false;
+  setInterceptTargetsHighlight(false);
   planPanel.classList.add('plan-panel-invisible');
-  planUnitLabel.textContent = ' '; // geschütztes Leerzeichen, sonst kollabiert die Zeilenhöhe (Spielfeld "springt")
   renderPlanTable();
   clearHighlights();
   clearPath();
@@ -667,16 +1313,59 @@ function shotDisplay(shotStep, index) {
   return { type: 'near', cells, launchTick: index, arrivalTick: index + cfg.ticks - 1 };
 }
 
-// Zaehlt, wie viele Eintraege im Plan tatsaechliche Feldwechsel sind
-// (Skip-Schritte, bei denen das Feld gleich bleibt, zaehlen nicht mit).
+// Ob die gerade gewaehlte Einheit eine Blickrichtung hat (Reiter).
+function selectedHasFacing() {
+  return !!(selectedUnitId && UnitTypes.hasFacing(unitsById[selectedUnitId].typeKey));
+}
+
+// Blickrichtung (0..5) der gewaehlten Einheit nach den ersten `upto` Schritten
+// ihres Plans (upto weggelassen = ganzer Plan). Startwert ist die persistente
+// Blickrichtung; jeder Lauf-Schritt setzt sie auf die gelaufene Richtung, jeder
+// Dreh-Schritt auf step.turn.
+function planFacingAt(plan, upto) {
+  let facing = facings[selectedUnitId];
+  if (facing == null) facing = 0;
+  let prev = positions[selectedUnitId];
+  const n = (upto == null) ? plan.length : upto;
+  for (let i = 0; i < n; i++) {
+    const s = plan[i];
+    if (!s) break;
+    if (s.turn != null) {
+      facing = s.turn;
+    } else if (s.q !== prev.q || s.r !== prev.r) {
+      const d = HexBoard.dirBetween(prev, s);
+      if (d >= 0) facing = d;
+    }
+    prev = s;
+  }
+  return facing;
+}
+
+function currentPlanFacing() {
+  return planFacingAt(currentUnitPlan());
+}
+
+// Zaehlt, wie viele Eintraege im Plan als Bewegung zaehlen: echte Feldwechsel
+// UND Abfang-Schritte (die im Plan am Ursprungsfeld haengen, aber als eine
+// Bewegung zaehlen). Skip-Schritte zaehlen nicht mit.
 function countMoveSteps(plan, startPos) {
   let previous = startPos;
   let moves = 0;
   plan.forEach(step => {
-    if (step.q !== previous.q || step.r !== previous.r) moves++;
+    if (step.intercept != null || step.q !== previous.q || step.r !== previous.r) moves++;
     previous = step;
   });
   return moves;
+}
+
+// Ob die gerade gewaehlte Einheit den Abfangen-Schritt planen kann.
+function selectedCanIntercept() {
+  return !!(selectedUnitId && UnitTypes.canIntercept(unitsById[selectedUnitId].typeKey));
+}
+
+// Index des (hoechstens einen) Abfang-Schritts im Plan, sonst -1.
+function planInterceptIndex(plan) {
+  return plan.findIndex(s => s && s.intercept != null);
 }
 
 // Tabelle horizontal: Kopfzeile = Takt-Nummern, Datenzeile = gewähltes Feld.
@@ -703,6 +1392,13 @@ function renderPlanTable() {
         const cfg = UnitTypes.shotConfig('bogenschuetze', plan[i].shot.type);
         td.textContent = `🏹 ${cfg ? cfg.label : ''}`;
         td.classList.add('shot-cell');
+      } else if (plan[i].turn != null) {
+        td.textContent = `⟳ ${screenArrowGlyph(plan[i].turn)}`;
+        td.classList.add('turn-cell');
+      } else if (plan[i].intercept != null) {
+        const tgt = unitsById[plan[i].intercept];
+        td.textContent = `🎯 ${tgt ? tgt.label : '?'}`;
+        td.classList.add('intercept-cell');
       } else if (isSkip) {
         td.textContent = 'bleibt';
         td.classList.add('skip-cell');
@@ -738,13 +1434,30 @@ function renderPlanTable() {
 function refreshShotUI() {
   Object.values(hexElements).forEach(el =>
     el.classList.remove('shot-target', 'shot-target-2'));
-  shotInfoTable.classList.add('hidden');
-  shotInfoBody.innerHTML = '';
 
   const unit = selectedUnitId && unitsById[selectedUnitId];
   const isArcher = unit && unit.typeKey === 'bogenschuetze';
+  const isFacer = unit && UnitTypes.hasFacing(unit.typeKey);
+  const isInterceptor = unit && UnitTypes.canIntercept(unit.typeKey);
+
+  // Der Bereich unter der Takt-Tabelle behaelt IMMER seine Hoehe (min-height in
+  // CSS). .is-hidden blendet nur den Inhalt aus - so aendert das Spielfeld weder
+  // beim Auswaehlen einer Einheit noch beim Planen einer Aktion die Groesse.
+  shotArea.classList.toggle('is-hidden', !(isArcher || isFacer || isInterceptor));
+  shotControls.classList.toggle('hidden', !isArcher);
+  turnControls.classList.toggle('hidden', !isFacer);
+  interceptControls.classList.toggle('hidden', !isInterceptor);
+  shotCrest.classList.toggle('hidden', !isArcher);
+
+  if (isFacer) refreshTurnUI();
+  if (isInterceptor) refreshInterceptUI();
+  if (!isInterceptor && interceptTargeting) {
+    interceptTargeting = false;
+    setInterceptTargetsHighlight(false);
+  }
+
   if (!isArcher) {
-    shotControls.classList.add('hidden');
+    shotCrest.classList.add('is-hidden');
     shotTargeting = null;
     return;
   }
@@ -753,10 +1466,12 @@ function refreshShotUI() {
   const existing = findShotStep(plan);
 
   if (confirmed) {
-    shotControls.classList.add('hidden');
     shotTargeting = null;
+    farShotButton.disabled = true;
+    nearShotButton.disabled = true;
+    farShotButton.classList.remove('arming');
+    nearShotButton.classList.remove('arming');
   } else {
-    shotControls.classList.remove('hidden');
     const moves = countMoveSteps(plan, positions[selectedUnitId]);
     const nextTick = plan.length; // 0-basierter Index des gerade geplanten Takts
     const canArm = !existing && plan.length < UnitTypes.DEFAULT_MAX_STEPS && moves <= 1;
@@ -776,36 +1491,128 @@ function refreshShotUI() {
       const s = hexElements[HexBoard.keyOf(disp.cells[1].q, disp.cells[1].r)];
       if (s) s.classList.add('shot-target-2');
     }
-    renderShotInfoTable(disp);
+    fillShotCrest(disp);
+    shotCrest.classList.remove('is-hidden');
+  } else {
+    shotCrest.classList.add('is-hidden');
   }
 }
 
-function renderShotInfoTable(disp) {
-  const cfg = UnitTypes.shotConfig('bogenschuetze', disp.type);
+// Fuellt das Wappen: Kuerzel (WS/NS), Ziel-Feld(er) und Ankunfts-Takt.
+function fillShotCrest(disp) {
   const label = (c) => {
     const l = HexBoard.labelOf(c.q, c.r);
     return `${l.col},${l.row}`;
   };
-  const rows = [
-    ['Schuss', cfg.label],
-    ['Abschuss', `Takt ${disp.launchTick + 1}`]
-  ];
-  if (disp.type === 'far') rows.push(['in der Luft', `Takt ${disp.launchTick + 2}`]);
-  rows.push(['Ankunft', `Takt ${disp.arrivalTick + 1}`]);
-  rows.push(['Ziel', disp.cells.map(label).join(' → ')]);
+  shotCrestType.textContent = disp.type === 'far' ? 'WS' : 'NS';
+  shotCrestType.title = disp.type === 'far' ? 'Weitschuss' : 'Nahschuss';
+  shotCrestTarget.textContent = disp.cells.map(label).join(' → ');
+  shotCrestArrival.textContent = `Takt ${disp.arrivalTick + 1}`;
+}
 
-  shotInfoBody.innerHTML = '';
-  rows.forEach(([k, v]) => {
-    const tr = document.createElement('tr');
-    const th = document.createElement('th');
-    th.textContent = k;
-    const td = document.createElement('td');
-    td.textContent = v;
-    tr.appendChild(th);
-    tr.appendChild(td);
-    shotInfoBody.appendChild(tr);
+// ---------- Reiter: Dreh-Schritt (Blickrichtung aendern, kostet 1 Takt) ----------
+
+function refreshTurnUI() {
+  const plan = currentUnitPlan();
+  const slotFree = plan.length < UnitTypes.DEFAULT_MAX_STEPS;
+  turnButton.disabled = confirmed || (!slotFree && !turnTargeting);
+  turnButton.classList.toggle('arming', turnTargeting);
+}
+
+function enterTurnTargeting() {
+  if (!selectedUnitId || confirmed || !selectedHasFacing()) return;
+  if (!turnTargeting && currentUnitPlan().length >= UnitTypes.DEFAULT_MAX_STEPS) return;
+
+  turnTargeting = !turnTargeting;
+  shotTargeting = null;
+  clearHighlights();
+  if (turnTargeting) {
+    highlightTurnTargets();
+    statusEl.textContent = 'Drehen: neue Blickrichtung waehlen (kostet 1 Takt).';
+  } else {
+    highlightNextOptions();
+  }
+  refreshShotUI();
+}
+
+function highlightTurnTargets() {
+  clearHighlights();
+  const from = currentPlanEndPosition();
+  const facing = currentPlanFacing();
+  HexBoard.DIRECTIONS.forEach((d, i) => {
+    if (i === facing) return; // aktuelle Blickrichtung waehlen bringt nichts
+    const el = hexElements[HexBoard.keyOf(from.q + d.dq, from.r + d.dr)];
+    if (el) el.classList.add('shot-selectable');
   });
-  shotInfoTable.classList.remove('hidden');
+}
+
+function handleTurnTargetClick(q, r) {
+  const el = hexElements[HexBoard.keyOf(q, r)];
+  if (!el || !el.classList.contains('shot-selectable')) return;
+
+  const from = currentPlanEndPosition();
+  const dir = HexBoard.dirBetween(from, { q, r });
+  if (dir < 0) return;
+
+  currentUnitPlan().push({ q: from.q, r: from.r, turn: dir });
+  turnTargeting = false;
+  clearHighlights();
+  renderPlanTable();
+  renderPath();
+  highlightNextOptions();
+}
+
+// ---------- Schwert/Lanze: Abfangen (Ziel = gegnerische Einheit) ----------
+
+function refreshInterceptUI() {
+  const plan = currentUnitPlan();
+  const slotFree = plan.length < UnitTypes.DEFAULT_MAX_STEPS;
+  const movesLeft = countMoveSteps(plan, positions[selectedUnitId]) < currentUnitMaxMoves();
+  // Abfang-Schritte zaehlen als Bewegung: solange noch Bewegungs-Budget frei ist
+  // (z.B. wer sich noch nicht bewegt hat, kann 2x abfangen). Sie muessen aber am
+  // Ende des Plans stehen - nach einem Abfang-Schritt ist kein Feldzug mehr
+  // moeglich (die Position danach ist serverseitig).
+  interceptButton.disabled = confirmed || !slotFree || !movesLeft;
+  interceptButton.classList.toggle('arming', interceptTargeting);
+}
+
+function setInterceptTargetsHighlight(on) {
+  Object.entries(unitElements).forEach(([id, el]) => {
+    const u = unitsById[id];
+    if (u && u.role !== myRole) el.classList.toggle('intercept-selectable', !!on);
+  });
+}
+
+function enterInterceptTargeting() {
+  if (!selectedUnitId || confirmed || !selectedCanIntercept()) return;
+  if (!interceptTargeting && interceptButton.disabled) return;
+
+  interceptTargeting = !interceptTargeting;
+  shotTargeting = null;
+  turnTargeting = false;
+  clearHighlights();
+  setInterceptTargetsHighlight(interceptTargeting);
+  if (interceptTargeting) {
+    statusEl.textContent = 'Abfangen: eine gegnerische Einheit anklicken.';
+  } else {
+    highlightNextOptions();
+  }
+  refreshShotUI();
+}
+
+function handleInterceptTargetClick(enemyId) {
+  if (!interceptTargeting || !selectedUnitId || confirmed) return;
+  if (!unitsById[enemyId] || unitsById[enemyId].role === myRole) return;
+
+  const from = currentPlanEndPosition();
+  currentUnitPlan().push({ q: from.q, r: from.r, intercept: enemyId });
+  interceptTargeting = false;
+  setInterceptTargetsHighlight(false);
+  clearHighlights();
+  renderPlanTable();
+  renderPath();
+  highlightNextOptions();
+  statusEl.textContent = `Abfangen: Ziel ${unitsById[enemyId].label}.`;
 }
 
 // Schaltet die Feld-/Richtungswahl fuer eine Schussart an (oder wieder aus,
@@ -881,14 +1688,18 @@ function highlightNextOptions() {
 
   const plan = currentUnitPlan();
   if (plan.length >= UnitTypes.DEFAULT_MAX_STEPS) return;
+  if (planInterceptIndex(plan) !== -1) return; // nach einem Abfang-Schritt kein Feldzug mehr
   if (countMoveSteps(plan, positions[selectedUnitId]) >= currentUnitMaxMoves()) return;
 
   const from = currentPlanEndPosition();
-  HexBoard.DIRECTIONS.forEach(({ dq, dr }) => {
-    const key = HexBoard.keyOf(from.q + dq, from.r + dr);
-    if (hexElements[key]) {
-      hexElements[key].classList.add('selectable');
-    }
+  // Reiter darf nur in seinen Front-Bogen (Blickrichtung +/- 60 Grad) laufen.
+  const allowed = selectedHasFacing()
+    ? HexBoard.frontArc(currentPlanFacing())
+    : HexBoard.DIRECTIONS.map((_, i) => i);
+  allowed.forEach(i => {
+    const d = HexBoard.DIRECTIONS[i];
+    const key = HexBoard.keyOf(from.q + d.dq, from.r + d.dr);
+    if (hexElements[key]) hexElements[key].classList.add('selectable');
   });
 }
 
@@ -924,6 +1735,15 @@ function renderPath() {
   ghost.setAttribute('r', CHIP_RADIUS);
   ghost.classList.add(`ghost-${myRole}`);
   pathGroup.appendChild(ghost);
+
+  // Reiter: geplante End-Blickrichtung als Dreieck am Ziel-Ghost.
+  if (selectedHasFacing()) {
+    const tri = document.createElementNS(SVG_NS, 'polygon');
+    tri.setAttribute('points', FACING_MARKER_POINTS);
+    tri.setAttribute('transform', `translate(${x}, ${y}) rotate(${dirScreenAngleDeg(currentPlanFacing())})`);
+    tri.classList.add('facing-marker', `facing-${myRole}`, 'facing-ghost');
+    pathGroup.appendChild(tri);
+  }
 }
 
 function addSkipStep() {
@@ -958,14 +1778,26 @@ function handleBoardClick(q, r) {
     handleShotTargetClick(q, r);
     return;
   }
+  if (turnTargeting) {
+    handleTurnTargetClick(q, r);
+    return;
+  }
+  if (interceptTargeting) return; // Ziel wird per Klick auf einen Gegner-Chip gewaehlt
 
   const plan = currentUnitPlan();
   if (plan.length >= UnitTypes.DEFAULT_MAX_STEPS) return;
+  if (planInterceptIndex(plan) !== -1) return; // Abfang-Schritt ist der letzte
   if (countMoveSteps(plan, positions[selectedUnitId]) >= currentUnitMaxMoves()) return;
 
   const from = currentPlanEndPosition();
   const distance = HexBoard.hexDistance(from, { q, r });
   if (distance !== 1) return; // nur direkte Nachbarn erlaubt
+
+  // Reiter: nur in den Front-Bogen der aktuellen (geplanten) Blickrichtung.
+  if (selectedHasFacing()) {
+    const dir = HexBoard.dirBetween(from, { q, r });
+    if (dir < 0 || !HexBoard.frontArc(currentPlanFacing()).includes(dir)) return;
+  }
 
   plan.push({ q, r });
   renderPlanTable();
@@ -975,12 +1807,18 @@ function handleBoardClick(q, r) {
 
 farShotButton.addEventListener('click', () => enterShotTargeting('far'));
 nearShotButton.addEventListener('click', () => enterShotTargeting('near'));
+turnButton.addEventListener('click', () => enterTurnTargeting());
+interceptButton.addEventListener('click', () => enterInterceptTargeting());
 
 confirmButton.addEventListener('click', () => {
   if (confirmed || !myRoomId || !myRole) return;
   confirmed = true;
   confirmButton.disabled = true;
   editButton.classList.remove('hidden');
+  shotTargeting = null;
+  turnTargeting = false;
+  interceptTargeting = false;
+  setInterceptTargetsHighlight(false);
   clearHighlights();
   refreshShotUI();
   statusEl.textContent = 'Züge bestätigt. Warte auf Gegenspieler...';
@@ -1012,6 +1850,13 @@ const TICK_LABEL_DELAY = 500;
 const BASE_MOVE_DURATION = 700;
 const QUARTER_MOVE_DURATION = Math.round(BASE_MOVE_DURATION * 0.25);
 const REMAINDER_MOVE_DURATION = BASE_MOVE_DURATION - QUARTER_MOVE_DURATION;
+// Kurzer Vorlauf: das Reiter-Dreieck "teleportiert" in die Bewegungsrichtung
+// und steht einen Moment sichtbar so da, BEVOR sich der Reiter losbewegt.
+const FACING_SNAP_LEAD = 160;
+// Pause zwischen dem Viertel-Schritt aller anderen Einheiten und dem
+// Viertel-Schritt der Abfaenger (Schwert/Lanze), damit die Reihenfolge
+// "erst die anderen, dann die Abfaenger" sichtbar wird.
+const INTERCEPT_STAGE_GAP = 220;
 // "Der Takt pausiert": alle Einheiten stehen auf ihrem Viertel-Schritt, bevor
 // die Problemfaelle (Blockaden/Kaempfe) nacheinander abgehandelt werden -
 // macht sichtbar, wo es diesen Takt einen Konflikt gibt.
@@ -1054,6 +1899,8 @@ function setMoveDuration(unitId, ms) {
   if (el) el.style.transitionDuration = `${ms}ms`;
   const bar = hpBarElements[unitId];
   if (bar) bar.group.style.transitionDuration = `${ms}ms`;
+  const marker = facingMarkers[unitId];
+  if (marker) marker.style.transitionDuration = `${ms}ms`;
 }
 
 // Animiert EINEN blockierten Bewegungsversuch: das umkaempfte Feld wird gelb
@@ -1125,26 +1972,60 @@ async function animateCombatEvent(event) {
 
 const ARROW_RADIUS = Math.max(3, CHIP_RADIUS * 0.38);
 
-// Neuen Pfeil erzeugen: Punkt am Schuetzen-Feld, Zielfeld(er) markieren.
+// Kleine Pfeil-Silhouette (Spitze + Widerhaken + Schaft), zeigt nach +X;
+// die tatsaechliche Flugrichtung kommt ueber rotate() im transform dazu.
+const ARROW_POINTS = [
+  [1.5, 0], [0.2, -0.95], [0.5, -0.22], [-1.5, -0.22],
+  [-1.5, 0.22], [0.5, 0.22], [0.2, 0.95]
+].map(([x, y]) => `${(x * ARROW_RADIUS).toFixed(2)},${(y * ARROW_RADIUS).toFixed(2)}`).join(' ');
+
+function setArrowTransform(a, x, y) {
+  a.el.setAttribute('transform', `translate(${x}, ${y}) rotate(${a.angle})`);
+}
+
+// Anteil des Wegs zum Ziel, um den der Pfeil VOR dem Schuetzen-Feld startet -
+// er soll nicht direkt auf dem Schuetzen "erscheinen", sondern schon ein Stueck
+// in Flugrichtung. fromPos wird entsprechend verschoben, damit auch die
+// weitere Flugbahn (advanceArrows) von diesem Punkt aus interpoliert.
+const ARROW_SPAWN_LEAD = 0.12;
+
+// Kurzer, deutlicher "Abschuss-Blitz" am Startpunkt des Pfeils.
+function spawnArrowBurst(x, y) {
+  const ring = document.createElementNS(SVG_NS, 'circle');
+  ring.setAttribute('cx', x);
+  ring.setAttribute('cy', y);
+  ring.setAttribute('r', ARROW_RADIUS);
+  ring.classList.add('arrow-burst');
+  arrowLayer.appendChild(ring);
+  setTimeout(() => ring.remove(), 500);
+}
+
+// Neuen Pfeil erzeugen: kleine Pfeil-Form kurz vor dem Schuetzen-Feld, in
+// Flugrichtung gedreht, mit Abschuss-Blitz. Das Zielfeld wird waehrend des
+// Flugs NICHT markiert - wo der Pfeil einschlaegt, zeigt erst der Einschlag.
 function spawnArrow(ev) {
   if (activeArrows[ev.id]) return;
   const to = ev.cells[ev.cells.length - 1]; // Linienende (Nahschuss: Feld dahinter)
-  const dot = document.createElementNS(SVG_NS, 'circle');
-  dot.setAttribute('r', ARROW_RADIUS);
-  dot.classList.add('arrow-dot');
-  const p = toScreen(ev.from.q, ev.from.r);
-  dot.setAttribute('transform', `translate(${p.x}, ${p.y})`);
-  arrowLayer.appendChild(dot);
-
-  const cellEls = ev.cells
-    .map(c => hexElements[HexBoard.keyOf(c.q, c.r)])
-    .filter(Boolean);
-  cellEls.forEach(el => el.classList.add('arrow-target-cell'));
-
-  activeArrows[ev.id] = {
-    el: dot, fromPos: ev.from, toPos: to,
-    launchTick: ev.launchTick, arrivalTick: ev.arrivalTick, cellEls
+  const from = {
+    q: ev.from.q + (to.q - ev.from.q) * ARROW_SPAWN_LEAD,
+    r: ev.from.r + (to.r - ev.from.r) * ARROW_SPAWN_LEAD
   };
+  const p = toScreen(from.q, from.r);
+  const t = toScreen(to.q, to.r);
+  const angle = Math.atan2(t.y - p.y, t.x - p.x) * 180 / Math.PI;
+
+  const arrow = document.createElementNS(SVG_NS, 'polygon');
+  arrow.setAttribute('points', ARROW_POINTS);
+  arrow.classList.add('arrow-shot');
+  arrowLayer.appendChild(arrow);
+
+  const entry = {
+    el: arrow, fromPos: from, toPos: to, angle,
+    launchTick: ev.launchTick, arrivalTick: ev.arrivalTick
+  };
+  setArrowTransform(entry, p.x, p.y);
+  spawnArrowBurst(p.x, p.y);
+  activeArrows[ev.id] = entry;
 }
 
 // Alle fliegenden Pfeile auf ihren Bruchteil des Wegs fuer diesen Takt setzen.
@@ -1155,15 +2036,12 @@ function advanceArrows(tick) {
     const frac = Math.max(0, Math.min(1, (tick - a.launchTick) / span));
     const pt = pointAtFraction(a.fromPos, a.toPos, frac);
     a.el.style.transitionDuration = `${BASE_MOVE_DURATION}ms`;
-    a.el.setAttribute('transform', `translate(${pt.x}, ${pt.y})`);
+    setArrowTransform(a, pt.x, pt.y);
   });
 }
 
 function clearArrows() {
-  Object.values(activeArrows).forEach(a => {
-    a.cellEls.forEach(el => el.classList.remove('arrow-target-cell'));
-    a.el.remove();
-  });
+  Object.values(activeArrows).forEach(a => a.el.remove());
   Object.keys(activeArrows).forEach(k => delete activeArrows[k]);
 }
 
@@ -1178,7 +2056,7 @@ async function animateArrowImpact(ev) {
   if (a) {
     const pt = toScreen(landing.q, landing.r);
     a.el.style.transitionDuration = `${QUARTER_MOVE_DURATION}ms`;
-    a.el.setAttribute('transform', `translate(${pt.x}, ${pt.y})`);
+    setArrowTransform(a, pt.x, pt.y);
     await wait(QUARTER_MOVE_DURATION);
   }
 
@@ -1199,28 +2077,53 @@ async function animateArrowImpact(ev) {
 
   if (impactEl) impactEl.classList.remove('arrow-impact-cell');
   if (a) {
-    a.cellEls.forEach(el => el.classList.remove('arrow-target-cell'));
     a.el.remove();
     delete activeArrows[ev.id];
   }
 }
 
 async function animateRound(ticks) {
-  tickDisplay.classList.remove('tick-display-invisible');
+  tickDisplay.classList.add('tick-visible');
 
   for (let tick = 0; tick < ticks.length; tick++) {
     tickDisplay.textContent = `Takt ${tick + 1} von ${ticks.length}`;
     await wait(TICK_LABEL_DELAY);
 
-    const { positions: tickPositions, blockedAttempts, combatEvents, arrowEvents = [] } = ticks[tick];
+    const { positions: tickPositions, facings: tickFacings, blockedAttempts, combatEvents, arrowEvents = [] } = ticks[tick];
+
+    // Reiter, die sich diesen Takt bewegen: Blickrichtung SOFORT (ohne
+    // Transition) auf die Bewegungsrichtung "teleportieren" - danach gleiten
+    // Chip UND Dreieck 100% synchron aufs naechste Feld (setMoveDuration setzt
+    // beiden dieselbe Transition-Dauer). Reine Dreh-Schritte ohne Feldwechsel
+    // bleiben ausgenommen und drehen sich am Takt-Ende sanft in der CSS-Transition.
+    let snappedAny = false;
+    if (tickFacings) {
+      Object.keys(facingMarkers).forEach(unitId => {
+        const to = tickPositions[unitId];
+        const from = positions[unitId];
+        if (!to || !from || tickFacings[unitId] == null) return;
+        if (samePos(to, from)) return;
+        if (facings[unitId] !== tickFacings[unitId]) {
+          facings[unitId] = tickFacings[unitId];
+          snapFacingMarker(unitId);
+          snappedAny = true;
+        }
+      });
+    }
+    // Dreieck-Ausrichtung kurz sacken lassen, bevor die Bewegung startet.
+    if (snappedAny) await wait(FACING_SNAP_LEAD);
 
     // Pfeile: neue abschiessen, fliegende weiterbewegen, Einschlaege zuerst
     // abhandeln (Server rechnet Pfeilschaden VOR Bewegung/Nahkampf des Takts).
     arrowEvents.forEach(ev => { if (ev.kind === 'launch') spawnArrow(ev); });
     advanceArrows(tick);
-    for (const ev of arrowEvents) {
-      if (ev.kind === 'impact') await animateArrowImpact(ev);
-    }
+    // Alle Einschlaege dieses Takts GLEICHZEITIG: die Pfeile sollen zusammen
+    // ankommen, nicht nacheinander.
+    await Promise.all(
+      arrowEvents
+        .filter(ev => ev.kind === 'impact')
+        .map(ev => animateArrowImpact(ev))
+    );
 
     // Einheiten, die diesen Takt bereits "behandelt" wurden (blockiert oder
     // im Kampf unterlegen/gleichstehend) und deshalb NICHT mehr in Phase 3
@@ -1250,23 +2153,37 @@ async function animateRound(ticks) {
       });
     });
     const attemptingIds = Object.keys(attemptTargets);
+    const interceptorSet = new Set(ticks[tick].interceptors || []);
+    const hasConflict = blockedAttempts.length > 0 || combatEvents.length > 0;
 
-    if (blockedAttempts.length > 0 || combatEvents.length > 0) {
-      // Es gibt diesen Takt einen Konflikt (Blockade und/oder Kampf): ALLE
-      // Einheiten mit einem Bewegungsversuch ruecken erst gemeinsam ein
-      // Viertel des Weges vor, dann pausiert der Takt sichtbar, bevor die
-      // Problemfaelle nacheinander abgehandelt werden (siehe unten). Ohne
-      // Konflikt (else-Zweig) laeuft der Takt stattdessen einfach glatt durch.
+    if (hasConflict || interceptorSet.size > 0) {
+      // Konflikt-Takt ODER Abfang-Takt: gestufte Vor-Bewegung. Reihenfolge -
+      // erst ruecken ALLE Nicht-Abfaenger einen Viertel-Schritt vor, DANN die
+      // Abfaenger (Schwert/Lanze) einen Viertel-Schritt auf ihr serverseitig
+      // berechnetes Feld; erst danach folgen Begegnungen + Rest-Bewegungen.
+      const others = attemptingIds.filter(id => !interceptorSet.has(id));
+      const interceptors = attemptingIds.filter(id => interceptorSet.has(id));
 
-      // Phase 1: ALLE Einheiten mit einem Bewegungsversuch ruecken
-      // gemeinsam ein Viertel des Weges zu ihrem jeweiligen Ziel vor.
-      attemptingIds.forEach(unitId => {
+      // Phase 1a: alle Nicht-Abfaenger einen Viertel-Schritt vor.
+      others.forEach(unitId => {
         setMoveDuration(unitId, QUARTER_MOVE_DURATION);
         const quarter = pointAtFraction(positions[unitId], attemptTargets[unitId], 0.25);
         moveUnitTo(unitId, quarter.x, quarter.y);
       });
-      await wait(QUARTER_MOVE_DURATION);
-      await wait(TICK_PAUSE_HOLD); // Takt pausiert - Konflikte werden sichtbar
+      if (others.length > 0) await wait(QUARTER_MOVE_DURATION);
+
+      // Phase 1b: erst DANACH die Abfaenger einen Viertel-Schritt vor.
+      if (interceptors.length > 0) {
+        await wait(INTERCEPT_STAGE_GAP);
+        interceptors.forEach(unitId => {
+          setMoveDuration(unitId, QUARTER_MOVE_DURATION);
+          const quarter = pointAtFraction(positions[unitId], attemptTargets[unitId], 0.25);
+          moveUnitTo(unitId, quarter.x, quarter.y);
+        });
+        await wait(QUARTER_MOVE_DURATION);
+      }
+
+      if (hasConflict) await wait(TICK_PAUSE_HOLD); // Takt pausiert - Konflikte werden sichtbar
 
       // Phase 2: Problemfaelle (Blockaden, dann Kaempfe) nacheinander abhandeln.
       for (const attempt of blockedAttempts) {
@@ -1308,16 +2225,28 @@ async function animateRound(ticks) {
       positions[unitId] = pos;
     });
 
+    // Blickrichtungen dieses Takts uebernehmen und die Dreieck-Marker drehen
+    // (Lauf-Richtung bzw. ausgefuehrter Dreh-Schritt).
+    if (tickFacings) {
+      Object.entries(tickFacings).forEach(([unitId, f]) => {
+        if (unitsById[unitId]) facings[unitId] = f;
+      });
+      refreshFacingMarkers();
+    }
+
     await wait(TICK_PAUSE_AFTER);
   }
 
-  tickDisplay.classList.add('tick-display-invisible');
+  tickDisplay.classList.remove('tick-visible');
   clearArrows();
   Object.values(unitsById).filter(u => u.role === myRole).forEach(u => {
     myPlans[u.id] = [];
   });
   confirmed = false;
   shotTargeting = null;
+  turnTargeting = false;
+  interceptTargeting = false;
+  setInterceptTargetsHighlight(false);
   confirmButton.disabled = false;
   statusEl.textContent = 'Neue Runde - klick auf eine deiner Einheiten, um Züge zu planen.';
 }

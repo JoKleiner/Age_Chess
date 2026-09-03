@@ -88,8 +88,64 @@ function createRoom() {
     units: null,
     positions: null,
     hp: null,
-    plans: { blue: null, red: null }
+    // facings: null oder { unitId: 0..5 } - Blickrichtung der Einheiten mit
+    // Blickrichtung (Reiter). Persistiert wie positions/hp ueber Runden.
+    facings: null,
+    plans: { blue: null, red: null },
+    // Match ueber mehrere Runden (best of 3): wer 2 Runden gewinnt, gewinnt.
+    scores: { blue: 0, red: 0 },
+    names: { blue: '', red: '' }, // gewaehlter Name, leer = "Spieler Blau/Rot"
+    round: 1,
+    closing: false               // Match vorbei, Raum schliesst gleich
   };
+}
+
+// Erlaubt Buchstaben (inkl. deutscher Umlaute), Ziffern, Leerzeichen und
+// gaengige Satzzeichen; insgesamt hoechstens 20 Zeichen.
+function sanitizeName(name) {
+  if (typeof name !== 'string') return '';
+  return name
+    .replace(/[^A-Za-z0-9À-ſ .,!?'"()@#&+\-_/:;]/g, '')
+    .slice(0, 20)
+    .trim();
+}
+
+function displayName(room, role) {
+  return room.names[role] || (role === 'blue' ? 'Spieler Blau' : 'Spieler Rot');
+}
+
+function matchStatePayload(room) {
+  return {
+    scores: { ...room.scores },
+    round: room.round,
+    names: { blue: displayName(room, 'blue'), red: displayName(room, 'red') }
+  };
+}
+
+// Setzt den Raum fuer die naechste Runde zurueck in die Platzierungsphase
+// (Scores/Namen bleiben erhalten).
+function resetRoomForNextRound(room) {
+  room.phase = 'placement';
+  room.placements = { blue: [], red: [] };
+  room.ready = { blue: false, red: false };
+  room.units = null;
+  room.positions = null;
+  room.hp = null;
+  room.facings = null;
+  room.plans = { blue: null, red: null };
+  room.round += 1;
+}
+
+// Standard-Blickrichtung eines frisch platzierten Reiters, falls der Spieler
+// keine waehlt: Richtung Gegner (Index in HexBoard.DIRECTIONS - Blau blickt
+// nach Norden, Rot nach Sueden; das Brett wird fuer Rot ohnehin gedreht).
+function defaultFacingFor(role) {
+  return role === 'blue' ? 2 : 5;
+}
+
+function sanitizeFacing(value, role) {
+  return Number.isInteger(value) && value >= 0 && value < 6
+    ? value : defaultFacingFor(role);
 }
 
 // Anzahl bereits platzierter Einheiten einer Art fuer eine Rolle
@@ -127,19 +183,66 @@ function isValidPlacement(room, role, typeKey, q, r) {
 // UnitTypes.maxStepsFor) - die restlichen Takte muessen "bleiben"-Schritte
 // sein, koennen aber an beliebiger Stelle im Plan liegen (z.B. erst 2 Takte
 // stehen bleiben und dann erst laufen).
-function isValidUnitSteps(steps, startPos, typeKey) {
+function isValidUnitSteps(steps, startPos, typeKey, startFacing, enemyIds) {
   if (!Array.isArray(steps) || steps.length > UnitTypes.DEFAULT_MAX_STEPS) return false;
 
+  const hasFacing = UnitTypes.hasFacing(typeKey);
+  const canIntercept = UnitTypes.canIntercept(typeKey);
   let previous = startPos;
+  let facing = Number.isInteger(startFacing) ? ((startFacing % 6) + 6) % 6 : 0;
   let moveCount = 0;
   let shotCount = 0;
+  let sawIntercept = false;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     if (!step || typeof step.q !== 'number' || typeof step.r !== 'number') return false;
     if (!validCellKeys.has(HexBoard.keyOf(step.q, step.r))) return false;
     const distance = HexBoard.hexDistance(previous, step);
     if (distance > 1) return false; // 0 = bleiben, 1 = bewegen
-    if (distance === 1) moveCount++;
+
+    if (step.intercept != null) {
+      // Abfang-Schritt: nur Schwert/Lanze, kein Feldwechsel im Plan (das Feld
+      // rechnet der Server im Ausfuehrungstakt), Ziel muss eine lebende
+      // gegnerische Einheit sein. Zaehlt als eine Bewegung. Danach duerfen nur
+      // noch weitere Abfang-Schritte oder "bleiben" folgen (die tatsaechliche
+      // Position nach dem Abfangen kennt der Client nicht).
+      if (!canIntercept) return false;
+      if (distance !== 0) return false;
+      if (step.shot != null || step.turn != null) return false;
+      if (!enemyIds || !enemyIds.has(step.intercept)) return false;
+      sawIntercept = true;
+      moveCount++;
+      previous = step;
+      continue;
+    }
+    // Nach einem Abfang-Schritt ist kein echter Feldwechsel/Schuss/Dreh mehr
+    // planbar (nur "bleiben").
+    if (sawIntercept && (distance === 1 || step.shot != null || step.turn != null)) return false;
+
+    if (step.turn != null) {
+      // Dreh-Schritt (nur Arten mit Blickrichtung): kein Feldwechsel, kostet
+      // aber den ganzen Takt und setzt die Blickrichtung auf einen beliebigen
+      // Index 0..5.
+      if (!hasFacing) return false;
+      if (distance !== 0) return false;
+      if (step.shot != null) return false;
+      if (!Number.isInteger(step.turn) || step.turn < 0 || step.turn > 5) return false;
+      facing = step.turn;
+      previous = step;
+      continue;
+    }
+
+    if (distance === 1) {
+      if (hasFacing) {
+        // Reiter darf nur in seinen Front-Bogen laufen und blickt danach in
+        // die gelaufene Richtung.
+        const dir = HexBoard.dirBetween(previous, step);
+        if (dir < 0 || !HexBoard.frontArc(facing).includes(dir)) return false;
+        facing = dir;
+      }
+      moveCount++;
+    }
+
     if (step.shot != null) {
       // Ein Bogenschuetzen-Schuss haengt als Zusatz an einem "bleibt"-Schritt
       // (im Abschuss-Takt steht der Schuetze). Geometrie/Takt werden hier
@@ -159,7 +262,7 @@ function isValidUnitSteps(steps, startPos, typeKey) {
 }
 
 // Prüft den kompletten Plan EINES Spielers (alle seine Einheiten auf einmal)
-function isValidRolePlan(planByUnit, positions, unitsForRole) {
+function isValidRolePlan(planByUnit, positions, unitsForRole, facings = {}, enemyIds = null) {
   if (!planByUnit || typeof planByUnit !== 'object') return false;
 
   const providedIds = Object.keys(planByUnit);
@@ -167,7 +270,7 @@ function isValidRolePlan(planByUnit, positions, unitsForRole) {
 
   for (const unit of unitsForRole) {
     if (!(unit.id in planByUnit)) return false;
-    if (!isValidUnitSteps(planByUnit[unit.id], positions[unit.id], unit.typeKey)) return false;
+    if (!isValidUnitSteps(planByUnit[unit.id], positions[unit.id], unit.typeKey, facings[unit.id], enemyIds)) return false;
   }
   return true;
 }
@@ -178,6 +281,43 @@ function posKeyOf(pos) {
 
 function samePos(a, b) {
   return a.q === b.q && a.r === b.r;
+}
+
+// Zielfeld eines Abfang-Schritts: von `from` (aktuelle Position des Abfaengers)
+// aus das Nachbarfeld - oder Stehenbleiben - mit der kleinsten Hex-Distanz zu
+// `aim` (dem Feld, auf das die Zieleinheit in diesem Takt zieht). Bei mehreren
+// gleich kurzen Feldern werden die NICHT von einem Verbuendeten belegten oder
+// beanspruchten bevorzugt; bleibt es dann noch mehrdeutig, entscheidet der
+// kleinste Richtungsindex (deterministisch).
+function computeInterceptCell(unitId, from, aim, desired, livePositions, unitsById) {
+  const role = unitsById[unitId].role;
+  const options = [{ q: from.q, r: from.r }]; // Stehenbleiben ist erlaubt
+  HexBoard.DIRECTIONS.forEach(d => {
+    const c = { q: from.q + d.dq, r: from.r + d.dr };
+    if (validCellKeys.has(HexBoard.keyOf(c.q, c.r))) options.push(c);
+  });
+
+  let bestDist = Infinity;
+  options.forEach(c => {
+    const dist = HexBoard.hexDistance(c, aim);
+    if (dist < bestDist) bestDist = dist;
+  });
+  const best = options.filter(c => HexBoard.hexDistance(c, aim) === bestDist);
+
+  const allyClaims = (c) => Object.keys(desired).some(other => {
+    if (other === unitId) return false;
+    if (unitsById[other].role !== role) return false;
+    return samePos(desired[other], c) || samePos(livePositions[other], c);
+  });
+  let pool = best.filter(c => !allyClaims(c));
+  if (pool.length === 0) pool = best;
+
+  pool.sort((a, b) => {
+    const ia = HexBoard.dirBetween(from, a); // -1 fuer Stehenbleiben -> zuerst
+    const ib = HexBoard.dirBetween(from, b);
+    return ia - ib;
+  });
+  return { q: pool[0].q, r: pool[0].r };
 }
 
 // Bei einem umkaempften Feld gewinnt die Einheit mit dem hoeheren speedRank
@@ -234,6 +374,15 @@ function resolveRound(room, combinedPlan) {
 
   const livePositions = {};
   Object.keys(combinedPlan).forEach(id => { livePositions[id] = { ...room.positions[id] }; });
+
+  // Blickrichtung je Einheit durch die Runde mitfuehren: aendert sich, wenn die
+  // Einheit laeuft (neue Richtung = gelaufene Richtung) oder einen Dreh-Schritt
+  // ausfuehrt. Wird pro Takt an den Client geschickt (Dreieck-Marker).
+  const liveFacing = {};
+  Object.keys(combinedPlan).forEach(id => {
+    if (!UnitTypes.hasFacing(unitsById[id].typeKey)) return;
+    liveFacing[id] = (room.facings && room.facings[id] != null) ? room.facings[id] : 0;
+  });
 
   const hp = { ...room.hp };
   const blockedUnits = new Set();
@@ -696,6 +845,10 @@ function resolveRound(room, combinedPlan) {
     });
 
     desired = {};
+    // Abfang-Schritte dieses Takts sammeln und ERST NACH allen anderen
+    // aufloesen: sie laufen auf das Feld zu, auf das ihre Zieleinheit in diesem
+    // Takt zieht (desired des Ziels).
+    const interceptStepsThisTick = [];
     Object.keys(combinedPlan).forEach(unitId => {
       if (deadUnits.has(unitId)) return; // existiert nicht mehr
       if (blockedUnits.has(unitId)) {
@@ -703,7 +856,28 @@ function resolveRound(room, combinedPlan) {
         return;
       }
       const step = combinedPlan[unitId][tick];
+      if (step && step.intercept != null) {
+        interceptStepsThisTick.push({ unitId, targetId: step.intercept });
+        desired[unitId] = { ...livePositions[unitId] }; // vorlaeufig stehen
+        return;
+      }
       desired[unitId] = step ? { q: step.q, r: step.r } : { ...livePositions[unitId] };
+    });
+
+    // Determinstische Reihenfolge, damit der Verbuendeten-Tie-Break (ein
+    // frueher aufgeloester Abfaenger belegt schon ein Feld) reproduzierbar ist.
+    interceptStepsThisTick.sort((a, b) => (a.unitId < b.unitId ? -1 : a.unitId > b.unitId ? 1 : 0));
+    const interceptorIds = [];
+    interceptStepsThisTick.forEach(({ unitId, targetId }) => {
+      const targetAlive = !deadUnits.has(targetId)
+        && livePositions[targetId] && hp[targetId] > 0;
+      if (!targetAlive) {
+        desired[unitId] = { ...livePositions[unitId] }; // Ziel weg -> stehen bleiben
+        return;
+      }
+      const aim = desired[targetId] || livePositions[targetId];
+      desired[unitId] = computeInterceptCell(unitId, livePositions[unitId], aim, desired, livePositions, unitsById);
+      interceptorIds.push(unitId);
     });
 
     // In der Reihenfolge entdeckte Blockaden/Kaempfe dieses Takts, fuer die
@@ -953,11 +1127,27 @@ function resolveRound(room, combinedPlan) {
     }
 
     Object.keys(desired).forEach(unitId => {
-      livePositions[unitId] = desired[unitId];
+      const prev = livePositions[unitId];
+      const next = desired[unitId];
+      if (liveFacing[unitId] != null) {
+        if (prev && next && !samePos(prev, next)) {
+          // Gelaufen: Blickrichtung = gelaufene Richtung.
+          const d = HexBoard.dirBetween(prev, next);
+          if (d >= 0) liveFacing[unitId] = d;
+        } else if (!blockedUnits.has(unitId)) {
+          // Stehen geblieben: falls dieser Takt ein Dreh-Schritt geplant war
+          // (und die Einheit nicht blockiert ist), Blickrichtung uebernehmen.
+          const step = combinedPlan[unitId] && combinedPlan[unitId][tick];
+          if (step && step.turn != null) liveFacing[unitId] = step.turn;
+        }
+      }
+      livePositions[unitId] = next;
     });
 
     ticks.push({
       positions: Object.fromEntries(Object.keys(desired).map(id => [id, { ...livePositions[id] }])),
+      facings: { ...liveFacing },
+      interceptors: interceptorIds,
       blockedAttempts,
       combatEvents,
       arrowEvents
@@ -966,7 +1156,7 @@ function resolveRound(room, combinedPlan) {
 
   deadUnits.forEach(id => { delete livePositions[id]; });
 
-  return { ticks, finalPositions: livePositions, finalHp: hp };
+  return { ticks, finalPositions: livePositions, finalHp: hp, finalFacings: liveFacing };
 }
 
 // Baut aus den (server-validierten) Platzierungen beider Spieler die finalen
@@ -975,6 +1165,7 @@ function buildUnitsAndPositions(room) {
   const units = [];
   const positions = {};
   const hp = {};
+  const facings = {};
 
   ['blue', 'red'].forEach(role => {
     room.placements[role].forEach((placement, index) => {
@@ -983,25 +1174,35 @@ function buildUnitsAndPositions(room) {
         .slice(0, index + 1)
         .filter(p => p.typeKey === placement.typeKey).length;
 
+      const facing = UnitTypes.hasFacing(placement.typeKey)
+        ? sanitizeFacing(placement.facing, role)
+        : null;
+
       units.push({
         id: placement.unitId,
         role,
         typeKey: placement.typeKey,
         label: `${type.label} ${sameTypeSoFar}`,
-        chipIndex: sameTypeSoFar
+        chipIndex: sameTypeSoFar,
+        facing
       });
       positions[placement.unitId] = { q: placement.q, r: placement.r };
       hp[placement.unitId] = UnitTypes.maxHpFor(placement.typeKey);
+      if (facing != null) facings[placement.unitId] = facing;
     });
   });
 
-  return { units, positions, hp };
+  return { units, positions, hp, facings };
 }
 
 io.on('connection', (socket) => {
   console.log('Spieler verbunden:', socket.id);
 
-  socket.on('joinRoom', (roomId) => {
+  socket.on('joinRoom', (payload) => {
+    const roomId = typeof payload === 'string' ? payload : (payload && payload.roomId);
+    const rawName = typeof payload === 'object' && payload ? payload.name : '';
+    if (!roomId) return;
+
     if (!rooms[roomId]) {
       rooms[roomId] = createRoom();
     }
@@ -1016,23 +1217,30 @@ io.on('connection', (socket) => {
     }
 
     room.sockets[role] = socket.id;
+    room.names[role] = sanitizeName(rawName);
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.role = role;
 
-    socket.emit('joined', { role, unitTypes: UnitTypes.TYPES, maxUnitsPerPlayer: UnitTypes.MAX_UNITS_PER_PLAYER });
+    socket.emit('joined', {
+      role,
+      unitTypes: UnitTypes.TYPES,
+      maxUnitsPerPlayer: UnitTypes.MAX_UNITS_PER_PLAYER,
+      match: matchStatePayload(room)
+    });
 
     console.log(`Spieler ${socket.id} ist Raum ${roomId} als ${role} beigetreten`);
 
     if (room.sockets.blue && room.sockets.red) {
       io.to(roomId).emit('placementPhaseStart');
+      io.to(roomId).emit('matchState', matchStatePayload(room));
     }
   });
 
   // Ein Spieler platziert die naechste Einheit eines Stapels auf ein Feld
   // seiner eigenen Zone. Reihenfolge in room.placements[role] = Stapel-Reihenfolge,
   // die Instanznummer (chipIndex/label) ergibt sich daraus erst beim Spielstart.
-  socket.on('placeUnit', ({ roomId, typeKey, q, r }) => {
+  socket.on('placeUnit', ({ roomId, typeKey, q, r, facing }) => {
     const room = rooms[roomId];
     if (!room) return;
     const role = socket.data.role;
@@ -1045,8 +1253,24 @@ io.on('connection', (socket) => {
     }
 
     const unitId = `${role}_${typeKey}_${countOfType(room.placements[role], typeKey) + 1}`;
-    room.placements[role].push({ unitId, typeKey, q, r });
+    const entry = { unitId, typeKey, q, r };
+    if (UnitTypes.hasFacing(typeKey)) entry.facing = sanitizeFacing(facing, role);
+    room.placements[role].push(entry);
     socket.emit('placementAccepted', { unitId, typeKey, q, r });
+  });
+
+  // Blickrichtung einer bereits platzierten Einheit aendern (nur solange die
+  // Platzierungsphase laeuft und der Spieler noch nicht bereit ist).
+  socket.on('setPlacementFacing', ({ roomId, unitId, facing }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    const role = socket.data.role;
+    if (!role || room.phase !== 'placement' || room.ready[role]) return;
+
+    const entry = room.placements[role].find(p => p.unitId === unitId);
+    if (entry && UnitTypes.hasFacing(entry.typeKey)) {
+      entry.facing = sanitizeFacing(facing, role);
+    }
   });
 
   // Nimmt die zuletzt platzierte Einheit einer Art wieder vom Brett (Stapel-Pop).
@@ -1084,11 +1308,12 @@ io.on('connection', (socket) => {
 
     if (room.ready.blue && room.ready.red) {
       room.phase = 'playing';
-      const { units, positions, hp } = buildUnitsAndPositions(room);
+      const { units, positions, hp, facings } = buildUnitsAndPositions(room);
       room.units = units;
       room.positions = positions;
       room.hp = hp;
-      io.to(roomId).emit('gameStart', { units, positions, hp });
+      room.facings = facings;
+      io.to(roomId).emit('gameStart', { units, positions, hp, facings });
     }
   });
 
@@ -1105,7 +1330,7 @@ io.on('connection', (socket) => {
   // Ein Spieler reicht die Pläne ALLER seiner Einheiten auf einmal ein
   socket.on('submitPlan', ({ roomId, plan }) => {
     const room = rooms[roomId];
-    if (!room || room.phase !== 'playing') return;
+    if (!room || room.phase !== 'playing' || room.closing) return;
 
     const role = socket.data.role;
     if (!role) return;
@@ -1113,7 +1338,11 @@ io.on('connection', (socket) => {
     // Besiegte (HP <= 0) Bataillone existieren nicht mehr und werden nicht
     // mehr eingeplant.
     const unitsForRole = room.units.filter(u => u.role === role && room.hp[u.id] > 0);
-    if (!isValidRolePlan(plan, room.positions, unitsForRole)) {
+    const enemyRole = role === 'blue' ? 'red' : 'blue';
+    const enemyIds = new Set(
+      room.units.filter(u => u.role === enemyRole && room.hp[u.id] > 0).map(u => u.id)
+    );
+    if (!isValidRolePlan(plan, room.positions, unitsForRole, room.facings || {}, enemyIds)) {
       socket.emit('planRejected', { reason: 'Ungültiger Zug.' });
       return;
     }
@@ -1129,14 +1358,69 @@ io.on('connection', (socket) => {
 
     if (room.plans.blue && room.plans.red) {
       const combinedPlan = { ...room.plans.blue, ...room.plans.red };
-      const { ticks, finalPositions, finalHp } = resolveRound(room, combinedPlan);
+      const { ticks, finalPositions, finalHp, finalFacings } = resolveRound(room, combinedPlan);
 
       room.positions = finalPositions;
       room.hp = finalHp;
-      io.to(roomId).emit('executeRound', { ticks });
-
+      room.facings = { ...(room.facings || {}), ...finalFacings };
       room.plans.blue = null;
       room.plans.red = null;
+
+      // Runde entschieden, sobald eine Seite keine Figuren mehr auf dem Feld
+      // hat. Beide gleichzeitig leer = Unentschieden (beide bekommen einen Punkt).
+      const aliveOf = (r) => room.units.filter(u => u.role === r && room.hp[u.id] > 0).length;
+      const blueAlive = aliveOf('blue');
+      const redAlive = aliveOf('red');
+      let roundWinner = null; // 'blue' | 'red' | 'draw' | null
+      if (blueAlive === 0 && redAlive === 0) roundWinner = 'draw';
+      else if (blueAlive === 0) roundWinner = 'red';
+      else if (redAlive === 0) roundWinner = 'blue';
+
+      let roundResult = null;
+      let matchResult = null;
+
+      if (roundWinner) {
+        if (roundWinner === 'draw') { room.scores.blue += 1; room.scores.red += 1; }
+        else room.scores[roundWinner] += 1;
+
+        roundResult = {
+          winner: roundWinner,
+          round: room.round,
+          ...matchStatePayload(room) // scores nach dem Punkt, names, round
+        };
+
+        if (room.scores.blue >= 2 || room.scores.red >= 2) {
+          const matchWinner = (room.scores.blue >= 2 && room.scores.red >= 2)
+            ? 'draw'
+            : (room.scores.blue >= 2 ? 'blue' : 'red');
+          matchResult = {
+            winner: matchWinner,
+            winnerName: matchWinner === 'draw' ? null : displayName(room, matchWinner)
+          };
+          room.closing = true;
+        } else {
+          resetRoomForNextRound(room);
+        }
+      }
+
+      io.to(roomId).emit('executeRound', { ticks, roundResult, matchResult });
+
+      if (matchResult) {
+        setTimeout(() => {
+          const r = rooms[roomId];
+          if (!r) return;
+          io.to(roomId).emit('returnToStart');
+          Object.values(r.sockets).forEach(sid => {
+            const s = io.sockets.sockets.get(sid);
+            if (s) {
+              s.leave(roomId);
+              s.data.roomId = null;
+              s.data.role = null;
+            }
+          });
+          delete rooms[roomId];
+        }, 5000);
+      }
     }
   });
 

@@ -36,17 +36,29 @@
       {
         key: 'reiter', label: 'Reiter', maxPerPlayer: 3, maxSteps: 4, speedRank: 4,
         chip: { kind: 'image', imageFolder: 'Reiter', imageBase: 'Reiter' },
-        hp: 15, damage: { reiter: 6, bogenschuetze: 10, schwertkaempfer: 9, lanze: 4 }
+        hp: 15, damage: { reiter: 6, bogenschuetze: 10, schwertkaempfer: 9, lanze: 4 },
+        // Blickrichtung (0..5, Index in HexBoard.DIRECTIONS): der Reiter darf pro
+        // Takt nur in seinen Front-Bogen laufen (geradeaus + die beiden
+        // 60-Grad-Nachbarn) und blickt danach in die gelaufene Richtung. Ein
+        // Dreh-Schritt (step.turn = neuer Index) kostet einen ganzen Takt und
+        // erlaubt jede beliebige neue Blickrichtung.
+        facing: true
       },
       {
         key: 'schwertkaempfer', label: 'Schwertkämpfer', maxPerPlayer: 3, maxSteps: 2, speedRank: 3,
         chip: { kind: 'image', imageFolder: 'Schild', imageBase: 'Schild' },
-        hp: 15, damage: { reiter: 6, bogenschuetze: 9, schwertkaempfer: 6, lanze: 9 }
+        hp: 15, damage: { reiter: 6, bogenschuetze: 9, schwertkaempfer: 6, lanze: 9 },
+        // "Abfangen": statt ein Feld selbst zu waehlen, wird eine gegnerische
+        // Einheit als Ziel gewaehlt; der Schritt (zaehlt als eine Bewegung)
+        // bewegt die Einheit im Ausfuehrungstakt automatisch ein Feld in
+        // Richtung des Feldes, auf das das Ziel in diesem Takt zieht.
+        intercept: true
       },
       {
         key: 'lanze', label: 'Lanze', maxPerPlayer: 3, maxSteps: 2, speedRank: 2,
         chip: { kind: 'image', imageFolder: 'Lanze', imageBase: 'Lanze' },
-        hp: 15, damage: { reiter: 12, bogenschuetze: 5, schwertkaempfer: 4, lanze: 6 }
+        hp: 15, damage: { reiter: 12, bogenschuetze: 5, schwertkaempfer: 4, lanze: 6 },
+        intercept: true
       },
       {
         key: 'bogenschuetze', label: 'Bogenschütze', maxPerPlayer: 3, maxSteps: 2, speedRank: 1,
@@ -59,7 +71,7 @@
         // Abschuss eingefroren - die Pfeile kommen erst spaeter an und machen
         // vollen Schaden, auch wenn das Bataillon zwischenzeitlich dezimiert
         // oder zerstoert wurde.
-        rangedDamage: { reiter: 4, bogenschuetze: 4, schwertkaempfer: 3, lanze: 7 },
+        rangedDamage: { reiter: 5, bogenschuetze: 4, schwertkaempfer: 4, lanze: 8 },
         // Zwei Schussarten. ticks = Anzahl Takte vom Abschuss BIS zum Einschlag
         // (Abschuss-Takt eingerechnet): Weitschuss Takt n -> Einschlag Takt n+2,
         // Nahschuss Takt n -> Einschlag Takt n+1. maxLaunchTick (1-basiert)
@@ -76,6 +88,19 @@
 
   UnitTypes.byKey = function (typeKey) {
     return UnitTypes.TYPES.find(t => t.key === typeKey);
+  };
+
+  // Hat diese Einheiten-Art eine Blickrichtung (mit Front-Bogen-Bewegung und
+  // Dreh-Schritten)? Aktuell nur der Reiter.
+  UnitTypes.hasFacing = function (typeKey) {
+    const type = UnitTypes.byKey(typeKey);
+    return !!(type && type.facing);
+  };
+
+  // Kann diese Art den "Abfangen"-Schritt planen? Schwertkaempfer + Lanze.
+  UnitTypes.canIntercept = function (typeKey) {
+    const type = UnitTypes.byKey(typeKey);
+    return !!(type && type.intercept);
   };
 
   // Maximale Anzahl Takte, die eine Einheit dieser Art pro Runde planen darf.
