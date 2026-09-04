@@ -25,6 +25,7 @@ const scoreDotsRed = document.getElementById('scoreDotsRed');
 const scoreRound = document.getElementById('scoreRound');
 const roundBanner = document.getElementById('roundBanner');
 const victoryOverlay = document.getElementById('victoryOverlay');
+const victoryTitle = document.getElementById('victoryTitle');
 const victoryName = document.getElementById('victoryName');
 const victoryCountdown = document.getElementById('victoryCountdown');
 const planPanel = document.getElementById('planPanel');
@@ -42,6 +43,9 @@ const turnControls = document.getElementById('turnControls');
 const turnButton = document.getElementById('turnButton');
 const interceptControls = document.getElementById('interceptControls');
 const interceptButton = document.getElementById('interceptButton');
+const moveOrSelectOverlay = document.getElementById('moveOrSelectOverlay');
+const choiceMoveButton = document.getElementById('choiceMoveButton');
+const choiceSelectButton = document.getElementById('choiceSelectButton');
 const confirmButton = document.getElementById('confirmButton');
 const editButton = document.getElementById('editButton');
 const tickDisplay = document.getElementById('tickDisplay');
@@ -77,7 +81,7 @@ let selectedUnitId = null;  // welche eigene Einheit wird gerade geplant
 let confirmed = false;
 let shotTargeting = null;   // 'far' | 'near' | null - Feld-/Richtungswahl fuer einen Schuss laeuft gerade
 let turnTargeting = false;  // true = Reiter waehlt gerade eine neue Blickrichtung (Dreh-Schritt)
-let interceptTargeting = false; // true = Schwert/Lanze waehlt gerade eine gegnerische Einheit zum Abfangen
+let interceptTargeting = false; // true = Schwert/Speerkaempfer waehlt gerade eine gegnerische Einheit zum Abfangen
 let matchScores = { blue: 0, red: 0 };
 let matchNames = { blue: 'Spieler Blau', red: 'Spieler Rot' };
 let facings = {};           // unitId -> Blickrichtung (0..5, Index in HexBoard.DIRECTIONS), nur Arten mit Blickrichtung
@@ -347,16 +351,19 @@ function setMatchState(match) {
 
 // ---------- Spielanleitung (Startbildschirm) ----------
 
-const manualButton = document.getElementById('manualButton');
+const manualButtonStart = document.getElementById('manualButtonStart');
+const manualButtonGame = document.getElementById('manualButtonGame');
 const manualOverlay = document.getElementById('manualOverlay');
 const manualContent = document.getElementById('manualContent');
 const manualClose = document.getElementById('manualClose');
 let manualBuilt = false;
 
-manualButton.addEventListener('click', () => {
+function openManual() {
   if (!manualBuilt) { buildManual(); manualBuilt = true; }
   manualOverlay.classList.remove('hidden');
-});
+}
+manualButtonStart.addEventListener('click', openManual);
+manualButtonGame.addEventListener('click', openManual);
 manualClose.addEventListener('click', () => manualOverlay.classList.add('hidden'));
 manualOverlay.addEventListener('click', (e) => {
   if (e.target === manualOverlay) manualOverlay.classList.add('hidden');
@@ -372,6 +379,14 @@ function mEl(tag, cls, text) {
   if (cls) el.className = cls;
   if (text != null) el.textContent = text;
   return el;
+}
+
+// Absatz mit fettem Label direkt in der Textzeile, z.B. "Bewegung: ...".
+function labeledP(label, text) {
+  const p = mEl('p');
+  p.appendChild(mEl('strong', null, `${label}: `));
+  p.appendChild(document.createTextNode(text));
+  return p;
 }
 
 // Kleines schematisches Hex-Feld (gleiche Ausrichtung wie das echte Brett).
@@ -425,7 +440,7 @@ function miniHex(spec) {
     const ln = document.createElementNS(SVG_NS, 'line');
     ln.setAttribute('x1', a.x); ln.setAttribute('y1', a.y);
     ln.setAttribute('x2', b.x); ln.setAttribute('y2', b.y);
-    ln.classList.add('manual-hex-arrow');
+    ln.classList.add(ar.cls || 'manual-hex-arrow');
     svg.appendChild(ln);
   });
 
@@ -471,6 +486,36 @@ function figure(svg, caption) {
 const RING1 = {};
 HexBoard.DIRECTIONS.forEach(d => { RING1[`${d.dq},${d.dr}`] = 'hl-reach'; });
 
+// Eine gemeinsame Tabelle fuer Nahkampf- UND Beschuss-Schaden: Zeile =
+// Angreifer, Spalte = getroffene Art. Der Bogenschuetze bekommt ZWEI Zeilen -
+// seinen (immer 0) Nahkampf-Schaden und separat seinen Schuss-Schaden -, weil
+// er als einzige Art beide Werte unabhaengig voneinander hat.
+function buildHpTable() {
+  const wrap = mEl('div', 'manual-table-wrap');
+  const table = mEl('table', 'manual-dmg-table');
+
+  const thead = mEl('thead');
+  const hr = mEl('tr');
+  hr.appendChild(mEl('th', null, 'Einheit'));
+  hr.appendChild(mEl('th', null, 'Einzel-HP'));
+  hr.appendChild(mEl('th', null, 'Gesamt-HP (Bataillon)'));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tb = mEl('tbody');
+  ['reiter', 'schwertkaempfer', 'lanze', 'bogenschuetze'].forEach(k => {
+    const type = UnitTypes.byKey(k);
+    const tr = mEl('tr');
+    tr.appendChild(mEl('th', null, type.label));
+    tr.appendChild(mEl('td', null, String(type.hp)));
+    tr.appendChild(mEl('td', null, String(type.hp * UnitTypes.BATTALION_SIZE)));
+    tb.appendChild(tr);
+  });
+  table.appendChild(tb);
+  wrap.appendChild(table);
+  return wrap;
+}
+
 function buildDamageTable() {
   const order = ['reiter', 'schwertkaempfer', 'lanze', 'bogenschuetze'];
   const wrap = mEl('div', 'manual-table-wrap');
@@ -479,12 +524,13 @@ function buildDamageTable() {
   const thead = mEl('thead');
   const hr = mEl('tr');
   hr.appendChild(mEl('th', 'manual-dmg-corner', 'Angreifer \\ Ziel'));
-  order.forEach(k => hr.appendChild(mEl('th', null, UnitTypes.byKey(k).label)));
+  order.forEach(k => hr.appendChild(mEl('th', k === 'reiter' ? 'manual-dmg-col-wide' : null, UnitTypes.byKey(k).label)));
   thead.appendChild(hr);
   table.appendChild(thead);
 
   const tb = mEl('tbody');
-  order.forEach(a => {
+
+  order.filter(a => a !== 'bogenschuetze').forEach(a => {
     const tr = mEl('tr');
     tr.appendChild(mEl('th', null, UnitTypes.byKey(a).label));
     order.forEach(d => {
@@ -493,96 +539,238 @@ function buildDamageTable() {
     });
     tb.appendChild(tr);
   });
+
+  const bow = UnitTypes.byKey('bogenschuetze');
+
+  const meleeRow = mEl('tr');
+  meleeRow.appendChild(mEl('th', null, `${bow.label} (Nahkampf)`));
+  order.forEach(d => meleeRow.appendChild(mEl('td', 'manual-dmg-zero', String(bow.damage[d]))));
+  tb.appendChild(meleeRow);
+
+  const shotRow = mEl('tr');
+  shotRow.appendChild(mEl('th', null, `${bow.label} (Schuss)`));
+  order.forEach(d => {
+    const v = bow.rangedDamage[d];
+    shotRow.appendChild(mEl('td', v === 0 ? 'manual-dmg-zero' : null, String(v)));
+  });
+  tb.appendChild(shotRow);
+
   table.appendChild(tb);
   wrap.appendChild(table);
   return wrap;
 }
 
-function buildRangedTable() {
-  const bow = UnitTypes.byKey('bogenschuetze');
-  const wrap = mEl('div', 'manual-table-wrap');
-  const table = mEl('table', 'manual-dmg-table');
-  const hr = mEl('tr');
-  hr.appendChild(mEl('th', null, 'Beschuss-Ziel'));
-  hr.appendChild(mEl('th', null, 'Schaden / Einheit'));
-  table.appendChild(hr);
-  ['lanze', 'reiter', 'schwertkaempfer', 'bogenschuetze'].forEach(k => {
-    const tr = mEl('tr');
-    tr.appendChild(mEl('th', null, UnitTypes.byKey(k).label));
-    tr.appendChild(mEl('td', null, String(bow.rangedDamage[k])));
-    table.appendChild(tr);
-  });
-  wrap.appendChild(table);
-  return wrap;
+// Bewegungsdiagramm "alle 6 Nachbarfelder" - von Schwertkaempfer, Speerkaempfer
+// und Bogenschuetze gleichermassen benutzt.
+function neighborMoveDiagrams() {
+  return [
+    figure(miniHex({
+      radius: 1,
+      highlights: Object.assign({ '0,0': 'hl-center' }, RING1),
+      chips: [{ q: 0, r: 0, role: 'blue' }]
+    }), 'Bewegung: alle 6 Nachbarfelder (bis zu 2× pro Runde)')
+  ];
+}
+
+// "Abfangen"-Text und -Diagramm sind fuer Schwertkaempfer und Speerkaempfer
+// identisch - beide fuehren dieselbe Spezialaktion aus.
+const INTERCEPT_TEXT = 'Statt ein Feld zu wählen, wird eine gegnerische Einheit als Ziel bestimmt – die Figur läuft ihr im Ausführungstakt automatisch entgegen bzw. in den Weg (das kürzeste Feld zum Zielfeld des Gegners). Wer sich in dieser Runde noch nicht bewegt hat, kann Abfangen 2× hintereinander einsetzen.';
+function interceptDiagrams() {
+  return [
+    figure(miniHex({
+      radius: 3,
+      highlights: { '-2,2': 'hl-center' },
+      chips: [{ q: -2, r: 2, role: 'blue' }, { q: 2, r: -2, role: 'red', label: '?' }],
+      arrows: [{ from: { q: -2, r: 2 }, to: { q: 2, r: -2 } }]
+    }), 'Abfangen: läuft dem gewählten Gegner entgegen')
+  ];
+}
+
+// Diagramme fuer die 3 Multikampf-Faelle. Zeigen jeweils nur das Zentrum +
+// die 6 echten Nachbarfelder: die beteiligten Figuren stehen auf Nachbar-
+// feldern und ziehen von dort auf das mittlere Feld.
+const MULTI_DIRS = HexBoard.DIRECTIONS;
+const multiCell = (i) => ({ q: MULTI_DIRS[i].dq, r: MULTI_DIRS[i].dr });
+
+// Fall 1: V bleibt stehen, A und B greifen gleichzeitig an - V teilt seine
+// Einheiten auf beide auf und schlaegt gegen beide zurueck.
+function fall1Diagrams() {
+  const a = multiCell(1), b = multiCell(4);
+  return [
+    figure(miniHex({
+      radius: 1,
+      highlights: { '0,0': 'hl-center' },
+      chips: [
+        { q: 0, r: 0, role: 'blue', label: 'V' },
+        { q: a.q, r: a.r, role: 'red', label: 'A' },
+        { q: b.q, r: b.r, role: 'red', label: 'B' }
+      ],
+      arrows: [
+        { from: a, to: { q: 0, r: 0 } },
+        { from: b, to: { q: 0, r: 0 } }
+      ]
+    }), 'V bleibt stehen, A und B greifen gleichzeitig an - V teilt sich auf und wehrt sich gegen beide')
+  ];
+}
+
+// Fall 2: V bleibt stehen, greift aber gezielt (z.B. per Abfangen) nur A an -
+// volle Staerke gegen A (hervorgehobene Linie), B trifft ungehindert.
+function fall2Diagrams() {
+  const a = multiCell(1), b = multiCell(4);
+  return [
+    figure(miniHex({
+      radius: 1,
+      highlights: { '0,0': 'hl-center' },
+      chips: [
+        { q: 0, r: 0, role: 'blue', label: 'V' },
+        { q: a.q, r: a.r, role: 'red', label: 'A' },
+        { q: b.q, r: b.r, role: 'red', label: 'B' }
+      ],
+      arrows: [
+        { from: a, to: { q: 0, r: 0 }, cls: 'manual-hex-arrow-focus' },
+        { from: b, to: { q: 0, r: 0 } }
+      ]
+    }), 'V greift gezielt nur A mit voller Stärke an (rote Linie) - B trifft ungehindert, ohne Gegenwehr')
+  ];
+}
+
+// Fall 3: leeres Feld, 2 verbuendete (blau) gegen 3 gegnerische (rot) Figuren.
+function fall3Diagrams() {
+  const a = multiCell(0), b = multiCell(3), c = multiCell(1), d = multiCell(2), e = multiCell(5);
+  return [
+    figure(miniHex({
+      radius: 1,
+      highlights: { '0,0': 'hl-center' },
+      chips: [
+        { q: a.q, r: a.r, role: 'blue', label: 'A' },
+        { q: b.q, r: b.r, role: 'blue', label: 'B' },
+        { q: c.q, r: c.r, role: 'red', label: 'C' },
+        { q: d.q, r: d.r, role: 'red', label: 'D' },
+        { q: e.q, r: e.r, role: 'red', label: 'E' }
+      ],
+      arrows: [
+        { from: a, to: { q: 0, r: 0 } },
+        { from: b, to: { q: 0, r: 0 } },
+        { from: c, to: { q: 0, r: 0 } },
+        { from: d, to: { q: 0, r: 0 } },
+        { from: e, to: { q: 0, r: 0 } }
+      ]
+    }), '2 verbündete (A, B) gegen 3 gegnerische Figuren (C, D, E) ziehen gleichzeitig auf das leere Feld')
+  ];
 }
 
 const MANUAL_UNITS = [
   {
     key: 'reiter',
-    move: 'Bis zu 4 Felder pro Runde – aber nur in den Front-Bogen der Blickrichtung: geradeaus und die beiden 60°-Nachbarn (3 Felder). Nach jedem Schritt zeigt „vorne" in die gelaufene Richtung. Der Button „Drehen" (kostet 1 Takt) richtet ihn in jede beliebige Richtung neu aus. Die Start-Blickrichtung wird beim Platzieren gewählt und als Dreieck angezeigt.',
-    attack: 'Nur Nahkampf. Stark gegen Bogenschütze (10) und Schwertkämpfer (9), schwach gegen die Lanze (4).',
-    diagrams: () => [
-      figure(miniHex({
-        radius: 1,
-        highlights: { '0,0': 'hl-center', '1,-1': 'hl-reach', '0,-1': 'hl-reach', '-1,0': 'hl-reach' },
-        chips: [{ q: 0, r: 0, role: 'blue' }],
-        facing: { q: 0, r: 0, dir: 2 }
-      }), 'Front-Bogen: nur die 3 Felder vor der Blickrichtung')
+    sections: [
+      {
+        heading: 'Bewegung',
+        text: 'Bis zu 4 Felder pro Runde – aber nur in den Front-Bogen der Blickrichtung: geradeaus und die beiden 60°-Nachbarn (3 Felder). Nach jedem Schritt zeigt „vorne" in die gelaufene Richtung. Die Start-Blickrichtung wird beim Platzieren gewählt und als Dreieck angezeigt.',
+        diagrams: () => [
+          figure(miniHex({
+            radius: 1,
+            highlights: { '0,0': 'hl-center', '1,-1': 'hl-reach', '0,-1': 'hl-reach', '-1,0': 'hl-reach' },
+            chips: [{ q: 0, r: 0, role: 'blue' }],
+            facing: { q: 0, r: 0, dir: 2 }
+          }), 'Front-Bogen: nur die 3 Felder vor der Blickrichtung')
+        ]
+      },
+      {
+        heading: 'Angriff',
+        text: 'Nur Nahkampf. Stark gegen Bogenschütze (10) und Schwertkämpfer (9), schwach gegen den Speerkämpfer (4).'
+      },
+      {
+        heading: 'Reiter-Spezial: Drehen',
+        text: 'Der Button „Drehen" kostet 1 Takt und richtet den Reiter neu aus – in jede beliebige Richtung, ohne dass er sich dabei ein Feld bewegt.'
+      }
     ]
   },
   {
     key: 'schwertkaempfer',
-    move: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen.',
-    attack: 'Nahkampf, ausgeglichen; besonders gut gegen Bogenschütze (9) und Lanze (9). Zusätzlich der Button „Abfangen": statt ein Feld zu wählen, wird eine gegnerische Einheit als Ziel bestimmt – die Figur läuft ihr im Ausführungstakt automatisch entgegen bzw. in den Weg (das kürzeste Feld zum Zielfeld des Gegners). Das zählt als eine Bewegung; Abfänger ziehen im Takt erst nach allen anderen.',
-    diagrams: () => [
-      figure(miniHex({
-        radius: 1,
-        highlights: Object.assign({ '0,0': 'hl-center' }, RING1),
-        chips: [{ q: 0, r: 0, role: 'blue' }]
-      }), 'Bewegung: alle 6 Nachbarfelder (bis zu 2× pro Runde)'),
-      figure(miniHex({
-        radius: 3,
-        highlights: { '-2,2': 'hl-center' },
-        chips: [{ q: -2, r: 2, role: 'blue' }, { q: 2, r: -2, role: 'red', label: '?' }],
-        arrows: [{ from: { q: -2, r: 2 }, to: { q: 2, r: -2 } }]
-      }), 'Abfangen: läuft dem gewählten Gegner entgegen')
+    sections: [
+      {
+        heading: 'Bewegung',
+        text: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen.',
+        diagrams: neighborMoveDiagrams
+      },
+      {
+        heading: 'Angriff',
+        text: 'Nahkampf, ausgeglichen; besonders gut gegen Bogenschütze (9) und den Speerkämpfer (9).'
+      },
+      {
+        heading: 'Schwertkämpfer-Spezial: Abfangen',
+        text: INTERCEPT_TEXT,
+        diagrams: interceptDiagrams
+      }
     ]
   },
   {
     key: 'lanze',
-    move: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen. Kann ebenfalls „Abfangen".',
-    attack: 'Nahkampf. Sehr stark gegen den Reiter (12), sonst mittel bis schwach.',
-    diagrams: () => [
-      figure(miniHex({
-        radius: 1,
-        highlights: Object.assign({ '0,0': 'hl-center' }, RING1),
-        chips: [{ q: 0, r: 0, role: 'blue' }]
-      }), 'Bewegung: alle 6 Nachbarfelder (bis zu 2× pro Runde)')
+    sections: [
+      {
+        heading: 'Bewegung',
+        text: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen.',
+        diagrams: neighborMoveDiagrams
+      },
+      {
+        heading: 'Angriff',
+        text: 'Nahkampf. Sehr stark gegen den Reiter (12), sonst mittel bis schwach.'
+      },
+      {
+        heading: 'Speerkämpfer-Spezial: Abfangen',
+        text: INTERCEPT_TEXT,
+        diagrams: interceptDiagrams
+      }
     ]
   },
   {
     key: 'bogenschuetze',
-    move: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen. Wer in dieser Runde schießt, darf höchstens 1 Feld laufen.',
-    attack: 'Im Nahkampf 0 Schaden – verliert jeden Nahkampf und verdrängt nie eine Figur. Dafür Fernkampf: Weitschuss auf ein Feld in 2–3 Feldern Entfernung (Pfeil schlägt nach 3 Takten ein) oder Nahschuss in eine Nachbar-Richtung – trifft das Nachbarfeld und das Feld dahinter (schlägt nach 2 Takten ein). Der Schaden wird beim Abschuss eingefroren.',
-    diagrams: () => {
-      const far = { '0,0': 'hl-center' };
-      const near = { '0,0': 'hl-center', '0,-1': 'hl-near', '0,-2': 'hl-near' };
-      for (let q = -3; q <= 3; q++) {
-        for (let r = -3; r <= 3; r++) {
-          if (Math.abs(q + r) > 3) continue;
-          const d = (Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2;
-          if (d >= 2 && d <= 3) far[`${q},${r}`] = 'hl-far';
+    sections: [
+      {
+        heading: 'Bewegung',
+        text: 'Bis zu 2 Felder pro Runde in jede der 6 Richtungen. Wer in dieser Runde schießt, darf höchstens 1 Feld laufen.',
+        diagrams: neighborMoveDiagrams
+      },
+      {
+        heading: 'Nahkampfangriff',
+        text: 'Im Nahkampf 0 Schaden – verliert jeden Nahkampf und verdrängt nie eine Figur.'
+      },
+      {
+        heading: 'Schuss-Schaden',
+        text: 'Der Schaden wird beim Abschuss "eingefroren" – die Pfeile treffen auch dann noch mit voller Wirkung, wenn das Bataillon bis zum Einschlag dezimiert oder zerstört wurde.'
+      },
+      {
+        heading: 'Weitschuss',
+        text: 'Trifft ein frei gewähltes Feld in 2–3 Feldern Entfernung. Der Pfeil schlägt 3 Takte nach dem Abschuss ein.',
+        diagrams: () => {
+          const far = { '0,0': 'hl-center' };
+          for (let q = -3; q <= 3; q++) {
+            for (let r = -3; r <= 3; r++) {
+              if (Math.abs(q + r) > 3) continue;
+              const d = (Math.abs(q) + Math.abs(r) + Math.abs(q + r)) / 2;
+              if (d >= 2 && d <= 3) far[`${q},${r}`] = 'hl-far';
+            }
+          }
+          return [
+            figure(miniHex({ radius: 3, highlights: far, chips: [{ q: 0, r: 0, role: 'blue' }] }),
+              'Weitschuss: jedes Feld in 2–3 Feldern Abstand')
+          ];
+        }
+      },
+      {
+        heading: 'Nahschuss',
+        text: 'Trifft in eine gewählte Nachbar-Richtung das Nachbarfeld oder, falls dieses leer ist, das Feld dahinter. Der Pfeil verursacht nur einmal Schaden – steht auf dem Nachbarfeld eine Figur, kommt beim Feld dahinter nichts mehr an. Der Pfeil schlägt 2 Takte nach dem Abschuss ein.',
+        diagrams: () => {
+          const near = { '0,0': 'hl-center', '0,-1': 'hl-near', '0,-2': 'hl-near' };
+          return [
+            figure(miniHex({
+              radius: 2, highlights: near, chips: [{ q: 0, r: 0, role: 'blue' }],
+              arrows: [{ from: { q: 0, r: 0 }, to: { q: 0, r: -2 } }]
+            }), 'Nahschuss: Nachbarfeld + Feld dahinter')
+          ];
         }
       }
-      return [
-        figure(miniHex({ radius: 3, highlights: far, chips: [{ q: 0, r: 0, role: 'blue' }] }),
-          'Weitschuss: jedes Feld in 2–3 Feldern Abstand'),
-        figure(miniHex({
-          radius: 2, highlights: near, chips: [{ q: 0, r: 0, role: 'blue' }],
-          arrows: [{ from: { q: 0, r: 0 }, to: { q: 0, r: -2 } }]
-        }), 'Nahschuss: Nachbarfeld + Feld dahinter')
-      ];
-    }
+    ]
   }
 ];
 
@@ -592,41 +780,44 @@ function buildManual() {
 
   c.appendChild(mEl('h2', null, 'Ziel des Spiels'));
   c.appendChild(mEl('p', null,
-    'Wer am Ende einer Runde noch Figuren auf dem Feld hat, gewinnt die Runde. Zwei Rundensiege gewinnen das Match (Best of 3). Verlieren beide Spieler in derselben Runde ihre letzten Figuren, bekommen beide einen Punkt.'));
+    'Wer am Ende einer Runde noch Figuren auf dem Feld hat, gewinnt die Runde. Zwei Sieg-Runden gewinnen das Match (Best of 3). Verlieren beide Spieler in derselben Runde ihre letzten Figuren, bekommen beide einen Punkt.'));
 
   c.appendChild(mEl('h2', null, 'Ablauf einer Runde'));
   const ul = mEl('ul');
   [
-    'Beide Spieler planen gleichzeitig – pro Einheit bis zu 4 Takte, jeder Takt ein Nachbarfeld oder „bleibt".',
-    'Erst wenn beide bestätigen, laufen alle Pläne Takt für Takt gleichzeitig ab.',
-    'Wollen zwei eigene Figuren aufs selbe Feld, gewinnt die „schnellere" Art: Reiter > Schwertkämpfer > Lanze > Bogenschütze.',
-    'Treffen Figuren verschiedener Spieler aufeinander, kämpfen sie. Wer kämpft, verwirkt den Rest seiner Planung für diese Runde.'
+    'Beide Spieler planen gleichzeitig – pro Figur bis zu 4 Takte',
+    'In jedem Takt kann eine Bewegung auf ein Nachbarfeld, eine Spezialaktion der Figur oder „bleiben" gewählt werden.',
+    'Wenn beide Spieler ihren Zug bestätigen, laufen alle Pläne Takt für Takt gleichzeitig ab.',
+    'Wollen sich zwei eigene Figuren auf das selbe Feld bewegen, läuft nur die „schnellere" Figur: Reiter > Schwertkämpfer > Speerkämpfer > Bogenschütze.',
+    'Die „langsamere" Figur bleibt stehen und verliert den Rest ihrer Planung für diese Runde.',
+    'Treffen Figuren gegnerischer Spieler aufeinander, kämpfen sie. Wer kämpft, verliert ebenfalls den Rest seiner Planung für diese Runde.'
   ].forEach(t => ul.appendChild(mEl('li', null, t)));
   c.appendChild(ul);
 
   c.appendChild(mEl('h2', null, 'Bataillone & Schaden'));
-  c.appendChild(mEl('p', null,
-    'Jede Figur ist ein Bataillon aus 10 Einzel-Einheiten mit gemeinsamem HP-Vorrat. HP pro Einzel-Einheit: Reiter, Schwertkämpfer, Lanze je 15 (Bataillon 150), Bogenschütze 10 (Bataillon 100).'));
+  c.appendChild(mEl('p', null, 'Jede Figur ist ein Bataillon aus 10 Einzel-Einheiten mit gemeinsamem HP-Vorrat.'));
+  c.appendChild(buildHpTable());
   c.appendChild(mEl('p', null,
     'Der Kampf-Schaden ist der Tabellenwert × noch lebende Einheiten im angreifenden Bataillon (bis zu 10). Der Bogenschütze macht im Nahkampf immer 0.'));
-  c.appendChild(mEl('h3', null, 'Nahkampf-Schaden (pro Einheit)'));
+  c.appendChild(mEl('h3', null, 'Schaden pro Einheit'));
   c.appendChild(buildDamageTable());
-  c.appendChild(mEl('div', 'manual-note', 'Zeile = Angreifer, Spalte = getroffene Art. Bogenschütze-Zeile: überall 0.'));
-  c.appendChild(mEl('h3', null, 'Bogenschütze – Beschuss-Schaden (pro Einheit)'));
-  c.appendChild(buildRangedTable());
-  c.appendChild(mEl('div', 'manual-note', 'Unabhängig vom Nahkampf. Gesamtschaden = dieser Wert × beim Abschuss lebende Schützen-Einheiten.'));
+  c.appendChild(mEl('div', 'manual-note', 'Gesamtschaden Bogenschütze = Schuss-Schaden × beim Abschuss lebende Schützen-Einheiten.'));
 
   c.appendChild(mEl('h2', null, 'Die Einheiten'));
   MANUAL_UNITS.forEach(u => {
     const box = mEl('div', 'manual-unit');
     box.appendChild(mEl('h3', null, UnitTypes.byKey(u.key).label));
+
+    // Alle Diagramme der Einheit zusammen in einer Reihe (wie vorher) -
+    // egal aus welchem Unterpunkt sie stammen.
     const diag = mEl('div', 'manual-diagrams');
-    u.diagrams().forEach(fig => diag.appendChild(fig));
-    box.appendChild(diag);
-    const mv = mEl('p'); mv.appendChild(mEl('strong', null, 'Bewegung: ')); mv.appendChild(document.createTextNode(u.move));
-    box.appendChild(mv);
-    const at = mEl('p'); at.appendChild(mEl('strong', null, 'Angriff: ')); at.appendChild(document.createTextNode(u.attack));
-    box.appendChild(at);
+    u.sections.forEach(sec => { if (sec.diagrams) sec.diagrams().forEach(fig => diag.appendChild(fig)); });
+    if (diag.childNodes.length) box.appendChild(diag);
+
+    // Unterpunkte als fette Label direkt in der Textzeile (wie vorher
+    // "Bewegung: ..." / "Angriff: ..."), nicht als eigene Ueberschriften.
+    u.sections.forEach(sec => box.appendChild(labeledP(sec.heading, sec.text)));
+
     c.appendChild(box);
   });
 
@@ -634,6 +825,54 @@ function buildManual() {
   [['lg-center', 'eigenes Feld'], ['lg-reach', 'erreichbar'], ['lg-far', 'Weitschuss-Ziel'], ['lg-near', 'Nahschuss']]
     .forEach(([cls, txt]) => legend.appendChild(mEl('span', cls, txt)));
   c.appendChild(legend);
+
+  c.appendChild(mEl('h2', null, 'Sonderfälle'));
+
+  const bleibenBox = mEl('div', 'manual-unit');
+  bleibenBox.appendChild(mEl('h3', null, 'Bleiben'));
+  bleibenBox.appendChild(mEl('p', null,
+    'Jede Figur kann in einem Takt statt einer Bewegung oder Aktion auch „bleiben" wählen. So lässt sich taktisch abwarten – der eigentliche Zug wird dann erst in einem späteren Takt derselben Runde ausgeführt.'));
+  c.appendChild(bleibenBox);
+
+  const multiBox = mEl('div', 'manual-unit');
+  multiBox.appendChild(mEl('h3', null, 'Multikämpfe'));
+  multiBox.appendChild(mEl('p', null,
+    'Kämpfen mehr als zwei Bataillone gleichzeitig um dasselbe Feld, unterscheidet das Spiel drei Fälle:'));
+
+
+
+
+
+    // Fall 1: stehender Verteidiger, teilt sich auf alle Angreifer auf.
+          const fall1Diag = mEl('div', 'manual-diagrams');
+    fall1Diagrams().forEach(fig => fall1Diag.appendChild(fig));
+  multiBox.appendChild(fall1Diag);
+  multiBox.appendChild(labeledP('Fall 1',
+    'Eine Figur bleibt in der Mitte stehen und wird von 2 gegnerischen Figuren gleichzeitig angegriffen. Die Figur in der Mitte teilt ihre lebenden Einheiten durch die Anzahl der Angreifer (aufgerundet) und schlägt mit dieser Stärke gegen jeden der beiden Angreifer zurück.'));
+  multiBox.appendChild(labeledP('Beispiel',
+    'Ein Speerkämpfer mit 5 lebenden Einheiten wird gleichzeitig von 2 Schwertkämpfern angegriffen. Er teilt seine 5 Einheiten durch die 2 Angreifer (aufgerundet: 3) und schlägt mit 3 Einheiten gegen jeden der beiden Schwertkämpfer zurück. Beide Angreifer teilen ihm gleichzeitig ihren vollen Schaden aus.'));
+
+
+  // Fall 2: stehender Verteidiger, konzentriert sich auf EINEN Angreifer.
+    const fall2Diag = mEl('div', 'manual-diagrams');
+    fall2Diagrams().forEach(fig => fall2Diag.appendChild(fig));
+  multiBox.appendChild(fall2Diag);
+  multiBox.appendChild(labeledP('Fall 2',
+    'Eine Figur befindet sich in der Mitte, greift aber gezielt einen der beiden Angreifer an. Ihre Einheiten teilen sich dabei nicht auf – sie kämpft mit voller Stärke nur gegen die gewählte Figur; der andere Angreifer trifft sie ungehindert, ohne Gegenwehr.'));
+  multiBox.appendChild(labeledP('Beispiel',
+    'Der Speerkämpfer mit 5 lebenden Einheiten wird von 2 Schwertkämpfern angegriffen, wehrt sich diesmal aber gezielt gegen einen von ihnen. Er greift mit allen 5 Einheiten nur diesen einen Schwertkämpfer an.'));
+
+
+  // Fall 3: leeres Feld, Bataillone beider Seiten treffen aufeinander.
+      const fall3Diag = mEl('div', 'manual-diagrams');
+  fall3Diagrams().forEach(fig => fall3Diag.appendChild(fig));
+  multiBox.appendChild(fall3Diag);
+  multiBox.appendChild(labeledP('Fall 3',
+    'Mehrere verbündete Figuren und mehrere gegnerische Figuren ziehen gleichzeitig auf ein leeres Feld in der Mitte. Jede Figur greift dabei jede gegnerische Figur an – ihre lebenden Einheiten werden durch die Anzahl gegnerischer Figuren geteilt (aufgerundet) und gegen jede von ihnen eingesetzt. Die Seite mit dem höheren Gesamtschaden gewinnt das Feld; aus ihren Überlebenden rückt die Figur mit dem meisten selbst ausgeteilten Schaden auf das Feld nach. Bei einem Gleichstand bleibt das Feld leer.'));
+  multiBox.appendChild(labeledP('Beispiel',
+    '2 Speerkämpfer und 3 gegnerische Schwertkämpfer ziehen auf dasselbe leere Feld. Jeder Speerkämpfer teilt seine Einheiten durch die 3 Gegner (aufgerundet) und greift damit alle drei Schwertkämpfer an; jeder Schwertkämpfer teilt seine Einheiten entsprechend durch die 2 Speerkämpfer und greift beide an.'));
+
+  c.appendChild(multiBox);
 }
 
 socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits, match }) => {
@@ -760,7 +999,7 @@ socket.on('returnToStart', () => {
 });
 
 socket.on('playerLeft', () => {
-  statusEl.textContent = 'Der andere Spieler hat die Verbindung getrennt.';
+  showEndOverlay('Verbindung getrennt', 'Der andere Spieler hat den Raum verlassen');
 });
 
 // Kurzes Banner nach einer entschiedenen Runde (kein Match-Ende).
@@ -778,10 +1017,12 @@ function showRoundBanner(roundResult) {
   });
 }
 
-// Match vorbei: Sieg-Overlay mit 5s-Countdown (der Server schickt danach
-// 'returnToStart').
-function showVictory({ winner, winnerName }) {
-  victoryName.textContent = winner === 'draw' ? 'Unentschieden' : (winnerName || '');
+// Gemeinsames Overlay fuer "Match vorbei" (Sieg) UND "Gegner hat den Raum
+// verlassen" - beide Male mit 5s-Countdown, danach schickt der Server
+// 'returnToStart'.
+function showEndOverlay(title, name) {
+  victoryTitle.textContent = title;
+  victoryName.textContent = name;
   victoryOverlay.classList.remove('hidden');
   let n = 5;
   victoryCountdown.textContent = String(n);
@@ -790,6 +1031,10 @@ function showVictory({ winner, winnerName }) {
     victoryCountdown.textContent = String(Math.max(0, n));
     if (n <= 0) clearInterval(iv);
   }, 1000);
+}
+
+function showVictory({ winner, winnerName }) {
+  showEndOverlay('Sieg', winner === 'draw' ? 'Unentschieden' : (winnerName || ''));
 }
 
 // Zuruecksetzen fuer die naechste Runde (Scores/Namen bleiben, alles andere
@@ -803,6 +1048,7 @@ function enterPlacementAgain(nextRound) {
   shotTargeting = null;
   turnTargeting = false;
   interceptTargeting = false;
+  closeMoveOrSelectPrompt();
   myPlans = {};
   pendingReiterPlacement = null;
 
@@ -1103,7 +1349,27 @@ function createUnitChip(unit) {
       handleInterceptTargetClick(unit.id);
       return;
     }
-    if (unit.role === myRole) selectUnit(unit.id);
+    const pos = positions[unit.id];
+    if (unit.role !== myRole) {
+      // Gegnerische Figur: Klick zaehlt wie ein Klick auf ihr Feld (Bewegung
+      // dorthin/Angriff, Schuss-/Dreh-Ziel), damit man nicht daneben klicken muss.
+      if (pos) handleBoardClick(pos.q, pos.r);
+      return;
+    }
+    // Eigene (verbuendete) Figur: bei der bereits ausgewaehlten Einheit
+    // selbst bleibt es beim reinen Auswaehlen (kein Bewegen-Vorschlag auf
+    // das eigene Feld).
+    if (unit.id === selectedUnitId) {
+      selectUnit(unit.id);
+      return;
+    }
+    if (pos && canPlanMoveStep(pos.q, pos.r)) {
+      promptFieldOrSelect('move', pos.q, pos.r, unit.id);
+    } else if (pos && canPlanTurnStep(pos.q, pos.r)) {
+      promptFieldOrSelect('turn', pos.q, pos.r, unit.id);
+    } else {
+      selectUnit(unit.id);
+    }
   });
   unitLayer.appendChild(el);
   return el;
@@ -1368,6 +1634,16 @@ function planInterceptIndex(plan) {
   return plan.findIndex(s => s && s.intercept != null);
 }
 
+// Kurzform der Art-Namen fuer die Takt-Tabelle (Abfangen-Ziel) - dort ist
+// wenig Platz, die vollen Namen (z.B. "Schwertkämpfer") wuerden die Spalte
+// sprengen.
+const INTERCEPT_TARGET_SHORT_LABEL = {
+  reiter: 'Reiter',
+  bogenschuetze: 'Schütze',
+  lanze: 'Speer',
+  schwertkaempfer: 'Schwert'
+};
+
 // Tabelle horizontal: Kopfzeile = Takt-Nummern, Datenzeile = gewähltes Feld.
 // Zellen anklickbar: leere (nächste) Zelle = aussetzen, gefüllte Zelle =
 // diesen Schritt + alle danach rückgängig machen.
@@ -1397,7 +1673,8 @@ function renderPlanTable() {
         td.classList.add('turn-cell');
       } else if (plan[i].intercept != null) {
         const tgt = unitsById[plan[i].intercept];
-        td.textContent = `🎯 ${tgt ? tgt.label : '?'}`;
+        const shortLabel = tgt ? (INTERCEPT_TARGET_SHORT_LABEL[tgt.typeKey] || tgt.label) : null;
+        td.textContent = `🎯 ${tgt ? `${shortLabel} ${tgt.chipIndex}` : '?'}`;
         td.classList.add('intercept-cell');
       } else if (isSkip) {
         td.textContent = 'bleibt';
@@ -1562,7 +1839,7 @@ function handleTurnTargetClick(q, r) {
   highlightNextOptions();
 }
 
-// ---------- Schwert/Lanze: Abfangen (Ziel = gegnerische Einheit) ----------
+// ---------- Schwert/Speerkaempfer: Abfangen (Ziel = gegnerische Einheit) ----------
 
 function refreshInterceptUI() {
   const plan = currentUnitPlan();
@@ -1766,6 +2043,51 @@ function removeStepsFrom(index) {
   highlightNextOptions();
 }
 
+// Ob die gerade ausgewaehlte Einheit ihren Plan aktuell um einen Bewegungs-
+// Schritt auf (q, r) erweitern koennte - reine Pruefung, ohne etwas zu
+// veraendern. Wird sowohl fuer den direkten Feld-Klick als auch fuer den
+// Bewegen-Vorschlag beim Klick auf eine verbuendete Figur benutzt.
+function canPlanMoveStep(q, r) {
+  if (!selectedUnitId || confirmed) return false;
+  if (shotTargeting || turnTargeting || interceptTargeting) return false;
+
+  const plan = currentUnitPlan();
+  if (plan.length >= UnitTypes.DEFAULT_MAX_STEPS) return false;
+  if (planInterceptIndex(plan) !== -1) return false; // Abfang-Schritt ist der letzte
+  if (countMoveSteps(plan, positions[selectedUnitId]) >= currentUnitMaxMoves()) return false;
+
+  const from = currentPlanEndPosition();
+  const distance = HexBoard.hexDistance(from, { q, r });
+  if (distance !== 1) return false; // nur direkte Nachbarn erlaubt
+
+  // Reiter: nur in den Front-Bogen der aktuellen (geplanten) Blickrichtung.
+  if (selectedHasFacing()) {
+    const dir = HexBoard.dirBetween(from, { q, r });
+    if (dir < 0 || !HexBoard.frontArc(currentPlanFacing()).includes(dir)) return false;
+  }
+
+  return true;
+}
+
+function planMoveStep(q, r) {
+  currentUnitPlan().push({ q, r });
+  renderPlanTable();
+  renderPath();
+  highlightNextOptions();
+}
+
+// Ob die gerade ausgewaehlte Einheit (im Drehen-Modus) das Feld (q, r) als
+// neue Blickrichtung waehlen koennte - reine Pruefung, analog zu
+// canPlanMoveStep. Wird fuer den Bewegen/Drehen-oder-Auswaehlen-Vorschlag
+// beim Klick auf eine verbuendete Figur benutzt.
+function canPlanTurnStep(q, r) {
+  if (!turnTargeting) return false;
+  const el = hexElements[HexBoard.keyOf(q, r)];
+  if (!el || !el.classList.contains('shot-selectable')) return false;
+  const from = currentPlanEndPosition();
+  return HexBoard.dirBetween(from, { q, r }) >= 0;
+}
+
 function handleBoardClick(q, r) {
   if (phase === 'placement') {
     handlePlacementClick(q, r);
@@ -1784,26 +2106,47 @@ function handleBoardClick(q, r) {
   }
   if (interceptTargeting) return; // Ziel wird per Klick auf einen Gegner-Chip gewaehlt
 
-  const plan = currentUnitPlan();
-  if (plan.length >= UnitTypes.DEFAULT_MAX_STEPS) return;
-  if (planInterceptIndex(plan) !== -1) return; // Abfang-Schritt ist der letzte
-  if (countMoveSteps(plan, positions[selectedUnitId]) >= currentUnitMaxMoves()) return;
-
-  const from = currentPlanEndPosition();
-  const distance = HexBoard.hexDistance(from, { q, r });
-  if (distance !== 1) return; // nur direkte Nachbarn erlaubt
-
-  // Reiter: nur in den Front-Bogen der aktuellen (geplanten) Blickrichtung.
-  if (selectedHasFacing()) {
-    const dir = HexBoard.dirBetween(from, { q, r });
-    if (dir < 0 || !HexBoard.frontArc(currentPlanFacing()).includes(dir)) return;
-  }
-
-  plan.push({ q, r });
-  renderPlanTable();
-  renderPath();
-  highlightNextOptions();
+  if (canPlanMoveStep(q, r)) planMoveStep(q, r);
 }
+
+// ---------- Klick auf verbuendete Figur: Aktion-oder-Auswaehlen-Abfrage ----------
+// Deckt sowohl "auf ihr Feld bewegen" als auch (im Drehen-Modus des Reiters)
+// "in ihre Richtung drehen" ab - derselbe Dialog, nur mit anderer Aktion.
+
+let pendingFieldAction = null; // { action: 'move' | 'turn', q, r, unitId }
+
+function promptFieldOrSelect(action, q, r, unitId) {
+  pendingFieldAction = { action, q, r, unitId };
+  choiceMoveButton.textContent = action === 'turn' ? 'Dorthin drehen' : 'Auf das Feld bewegen';
+  moveOrSelectOverlay.classList.remove('hidden');
+}
+
+function closeMoveOrSelectPrompt() {
+  pendingFieldAction = null;
+  moveOrSelectOverlay.classList.add('hidden');
+}
+
+choiceMoveButton.addEventListener('click', () => {
+  if (!pendingFieldAction) return;
+  const { action, q, r } = pendingFieldAction;
+  closeMoveOrSelectPrompt();
+  if (action === 'turn') {
+    if (canPlanTurnStep(q, r)) handleTurnTargetClick(q, r);
+  } else if (canPlanMoveStep(q, r)) {
+    planMoveStep(q, r);
+  }
+});
+
+choiceSelectButton.addEventListener('click', () => {
+  if (!pendingFieldAction) return;
+  const { unitId } = pendingFieldAction;
+  closeMoveOrSelectPrompt();
+  selectUnit(unitId);
+});
+
+moveOrSelectOverlay.addEventListener('click', (event) => {
+  if (event.target === moveOrSelectOverlay) closeMoveOrSelectPrompt();
+});
 
 farShotButton.addEventListener('click', () => enterShotTargeting('far'));
 nearShotButton.addEventListener('click', () => enterShotTargeting('near'));
@@ -1854,7 +2197,7 @@ const REMAINDER_MOVE_DURATION = BASE_MOVE_DURATION - QUARTER_MOVE_DURATION;
 // und steht einen Moment sichtbar so da, BEVOR sich der Reiter losbewegt.
 const FACING_SNAP_LEAD = 160;
 // Pause zwischen dem Viertel-Schritt aller anderen Einheiten und dem
-// Viertel-Schritt der Abfaenger (Schwert/Lanze), damit die Reihenfolge
+// Viertel-Schritt der Abfaenger (Schwert/Speerkaempfer), damit die Reihenfolge
 // "erst die anderen, dann die Abfaenger" sichtbar wird.
 const INTERCEPT_STAGE_GAP = 220;
 // "Der Takt pausiert": alle Einheiten stehen auf ihrem Viertel-Schritt, bevor
@@ -2113,6 +2456,25 @@ async function animateRound(ticks) {
     // Dreieck-Ausrichtung kurz sacken lassen, bevor die Bewegung startet.
     if (snappedAny) await wait(FACING_SNAP_LEAD);
 
+    // Reine Dreh-Schritte (Figur bleibt auf ihrem Feld, "Drehen"-Aktion) sollen
+    // sich zum SELBEN Zeitpunkt drehen wie sich andere Figuren diesen Takt
+    // bewegen - nicht erst ganz am Takt-Ende. Sanfte CSS-Transition-Drehung
+    // (kein Snap, da hier keine Bewegung folgt, die synchron dazu laufen muss).
+    if (tickFacings) {
+      let turnedInPlace = false;
+      Object.keys(facingMarkers).forEach(unitId => {
+        const to = tickPositions[unitId];
+        const from = positions[unitId];
+        if (!to || !from || tickFacings[unitId] == null) return;
+        if (!samePos(to, from)) return; // bewegt sich - oben schon behandelt
+        if (facings[unitId] !== tickFacings[unitId]) {
+          facings[unitId] = tickFacings[unitId];
+          turnedInPlace = true;
+        }
+      });
+      if (turnedInPlace) refreshFacingMarkers();
+    }
+
     // Pfeile: neue abschiessen, fliegende weiterbewegen, Einschlaege zuerst
     // abhandeln (Server rechnet Pfeilschaden VOR Bewegung/Nahkampf des Takts).
     arrowEvents.forEach(ev => { if (ev.kind === 'launch') spawnArrow(ev); });
@@ -2159,7 +2521,7 @@ async function animateRound(ticks) {
     if (hasConflict || interceptorSet.size > 0) {
       // Konflikt-Takt ODER Abfang-Takt: gestufte Vor-Bewegung. Reihenfolge -
       // erst ruecken ALLE Nicht-Abfaenger einen Viertel-Schritt vor, DANN die
-      // Abfaenger (Schwert/Lanze) einen Viertel-Schritt auf ihr serverseitig
+      // Abfaenger (Schwert/Speerkaempfer) einen Viertel-Schritt auf ihr serverseitig
       // berechnetes Feld; erst danach folgen Begegnungen + Rest-Bewegungen.
       const others = attemptingIds.filter(id => !interceptorSet.has(id));
       const interceptors = attemptingIds.filter(id => interceptorSet.has(id));

@@ -201,7 +201,7 @@ function isValidUnitSteps(steps, startPos, typeKey, startFacing, enemyIds) {
     if (distance > 1) return false; // 0 = bleiben, 1 = bewegen
 
     if (step.intercept != null) {
-      // Abfang-Schritt: nur Schwert/Lanze, kein Feldwechsel im Plan (das Feld
+      // Abfang-Schritt: nur Schwert/Speerkaempfer, kein Feldwechsel im Plan (das Feld
       // rechnet der Server im Ausfuehrungstakt), Ziel muss eine lebende
       // gegnerische Einheit sein. Zaehlt als eine Bewegung. Danach duerfen nur
       // noch weitere Abfang-Schritte oder "bleiben" folgen (die tatsaechliche
@@ -321,7 +321,7 @@ function computeInterceptCell(unitId, from, aim, desired, livePositions, unitsBy
 }
 
 // Bei einem umkaempften Feld gewinnt die Einheit mit dem hoeheren speedRank
-// (Reiter > Schwert > Lanze > Schuetze); bei gleicher Art gewinnt der
+// (Reiter > Schwert > Speerkaempfer > Schuetze); bei gleicher Art gewinnt der
 // kleinere chipIndex.
 function pickWinner(ids, unitsById) {
   return ids.slice().sort((a, b) => {
@@ -1437,13 +1437,39 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('Spieler getrennt:', socket.id);
     const { roomId, role } = socket.data;
-    if (roomId && rooms[roomId]) {
-      delete rooms[roomId].sockets[role];
-      io.to(roomId).emit('playerLeft');
-      if (!rooms[roomId].sockets.blue && !rooms[roomId].sockets.red) {
-        delete rooms[roomId];
-      }
+    const room = rooms[roomId];
+    if (!room) return;
+
+    delete room.sockets[role];
+
+    if (!room.sockets.blue && !room.sockets.red) {
+      delete rooms[roomId];
+      return;
     }
+
+    // Match ist bereits (regulaer) zu Ende und die Rueckkehr zum Start laeuft
+    // schon (siehe matchResult unten) - kein zweiter Countdown noetig.
+    if (room.closing) return;
+    room.closing = true;
+
+    // Verbleibender Spieler bekommt die Meldung wie beim Sieg-Overlay; nach
+    // 5s wird der Raum genauso geschlossen wie nach einem regulaeren
+    // Match-Ende (returnToStart + Socket verlaesst den Raum).
+    io.to(roomId).emit('playerLeft');
+    setTimeout(() => {
+      const r = rooms[roomId];
+      if (!r) return;
+      io.to(roomId).emit('returnToStart');
+      Object.values(r.sockets).forEach(sid => {
+        const s = io.sockets.sockets.get(sid);
+        if (s) {
+          s.leave(roomId);
+          s.data.roomId = null;
+          s.data.role = null;
+        }
+      });
+      delete rooms[roomId];
+    }, 5000);
   });
 });
 

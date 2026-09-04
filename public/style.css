@@ -267,8 +267,17 @@ body {
 }
 
 /* ---------- Punkte-Anzeige ueber dem Spielfeld ---------- */
+/* .score-bar ist nur noch ein Zeilen-Wrapper: der graue Kasten (.score-bar-inner)
+   und der i-Button daneben sind zwei getrennte Elemente, kein Button im Kasten. */
 .score-bar {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.score-bar-inner {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -375,16 +384,72 @@ body {
   color: #555;
 }
 
-/* ---------- Spielanleitung ---------- */
-.link-button {
-  background: none;
-  border: none;
-  color: #3366cc;
-  text-decoration: underline;
-  cursor: pointer;
+/* ---------- Bewegen-oder-Auswaehlen-Abfrage ---------- */
+.choice-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 15, 20, 0.55);
+}
+.choice-box {
+  background: #fff;
+  border-radius: 14px;
+  padding: 20px 24px;
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+  max-width: 90vw;
+}
+.choice-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 14px;
+}
+.choice-buttons {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.choice-buttons button {
+  padding: 10px 16px;
   font-size: 14px;
-  padding: 4px;
-  margin-top: 2px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* ---------- Spielanleitung: i-Button ---------- */
+.info-button {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid #777;
+  background: #fff;
+  color: #444;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+}
+.info-button:hover {
+  background: #f0f0f0;
+}
+.info-button-large {
+  width: 36px;
+  height: 36px;
+  font-size: 20px;
+  border-width: 2px;
+  margin-top: 6px;
 }
 .manual-overlay {
   position: fixed;
@@ -445,6 +510,7 @@ body {
 .manual-dmg-table tbody th { background: #eee; }
 .manual-dmg-corner { font-size: 11px; font-weight: 600; color: #555; }
 .manual-dmg-zero { color: #999; }
+.manual-dmg-col-wide { min-width: 68px; }
 .manual-note { font-size: 12px; color: #666; margin: 2px 0 10px; }
 
 .manual-unit {
@@ -479,6 +545,9 @@ body {
 }
 .manual-hex-facing { fill: #2b4fa0; stroke: #fff; stroke-width: 0.6; }
 .manual-hex-arrow { stroke: #7a4a10; stroke-width: 3; stroke-dasharray: 4 3; }
+/* Hervorgehobene Linie: gezielter Vollangriff auf EINE Figur (statt der
+   normalen, gestrichelten "beteiligt am Zusammenstoss"-Linie). */
+.manual-hex-arrow-focus { stroke: #cc3333; stroke-width: 3.5; }
 
 .manual-legend {
   font-size: 12px;
@@ -717,7 +786,7 @@ body {
   border-color: #14503b;
 }
 
-/* Schwert/Lanze: Abfangen-Button - selber reservierter Bereich wie Schuss/Dreh. */
+/* Schwert/Speerkaempfer: Abfangen-Button - selber reservierter Bereich wie Schuss/Dreh. */
 .intercept-controls {
   flex: 1 1 auto;
   display: flex;

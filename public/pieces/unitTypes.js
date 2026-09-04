@@ -31,7 +31,7 @@
 
     // speedRank bestimmt sowohl, welche Einheit bei einem Zusammenstoss auf
     // dasselbe Feld gewinnt (hoeherer Rang gewinnt), als auch implizit die
-    // Reihenfolge Reiter > Schwert > Lanze > Schuetze aus den Bewegungsregeln.
+    // Reihenfolge Reiter > Schwert > Speerkaempfer > Schuetze aus den Bewegungsregeln.
     TYPES: [
       {
         key: 'reiter', label: 'Reiter', maxPerPlayer: 3, maxSteps: 4, speedRank: 4,
@@ -55,7 +55,7 @@
         intercept: true
       },
       {
-        key: 'lanze', label: 'Lanze', maxPerPlayer: 3, maxSteps: 2, speedRank: 2,
+        key: 'lanze', label: 'Speerkämpfer', maxPerPlayer: 3, maxSteps: 2, speedRank: 2,
         chip: { kind: 'image', imageFolder: 'Lanze', imageBase: 'Lanze' },
         hp: 15, damage: { reiter: 12, bogenschuetze: 5, schwertkaempfer: 4, lanze: 6 },
         intercept: true
@@ -97,7 +97,7 @@
     return !!(type && type.facing);
   };
 
-  // Kann diese Art den "Abfangen"-Schritt planen? Schwertkaempfer + Lanze.
+  // Kann diese Art den "Abfangen"-Schritt planen? Schwertkaempfer + Speerkaempfer.
   UnitTypes.canIntercept = function (typeKey) {
     const type = UnitTypes.byKey(typeKey);
     return !!(type && type.intercept);
@@ -110,7 +110,7 @@
   };
 
   // Vergleichs-Rang fuer Zusammenstoesse zwischen eigenen Einheiten:
-  // hoeherer Rang gewinnt ein umkaempftes Feld (Reiter > Schwert > Lanze > Schuetze).
+  // hoeherer Rang gewinnt ein umkaempftes Feld (Reiter > Schwert > Speerkaempfer > Schuetze).
   UnitTypes.speedRankFor = function (typeKey) {
     const type = UnitTypes.byKey(typeKey);
     return type ? type.speedRank : 0;
