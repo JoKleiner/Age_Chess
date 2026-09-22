@@ -285,11 +285,18 @@ function samePos(a, b) {
 
 // Zielfeld eines Abfang-Schritts: von `from` (aktuelle Position des Abfaengers)
 // aus das Nachbarfeld - oder Stehenbleiben - mit der kleinsten Hex-Distanz zu
-// `aim` (dem Feld, auf das die Zieleinheit in diesem Takt zieht). Bei mehreren
-// gleich kurzen Feldern werden die NICHT von einem Verbuendeten belegten oder
-// beanspruchten bevorzugt; bleibt es dann noch mehrdeutig, entscheidet der
-// kleinste Richtungsindex (deterministisch).
-function computeInterceptCell(unitId, from, aim, desired, livePositions, unitsById) {
+// einem der `aims` (der Reihe nach versucht: zuerst das Feld, auf das die
+// Zieleinheit in diesem Takt zieht; danach - falls dort ALLE gleich nahen
+// Felder von einem Verbuendeten belegt/beansprucht sind und es keine gleich
+// nahe freie Alternative gibt - das AKTUELLE Feld der Zieleinheit als
+// Ausweich-Ziel. So laeuft der Abfaenger nicht sinnlos in einen belegten
+// eigenen Kollegen (und wird dort vom Doppelbelegungs-Sicherheitsnetz nur
+// wirkungslos zurueckgeschickt), sondern greift die Zieleinheit stattdessen
+// an ihrem Ursprungsfeld an. Bei mehreren gleich kurzen freien Feldern
+// entscheidet der kleinste Richtungsindex (deterministisch). Bleiben wirklich
+// ALLE versuchten Ziele durchgehend belegt, wird das beste Feld des LETZTEN
+// Versuchs genommen (bestmoeglicher Kompromiss statt gar keiner Bewegung).
+function computeInterceptCell(unitId, from, aims, desired, livePositions, unitsById) {
   const role = unitsById[unitId].role;
   const options = [{ q: from.q, r: from.r }]; // Stehenbleiben ist erlaubt
   HexBoard.DIRECTIONS.forEach(d => {
@@ -297,27 +304,36 @@ function computeInterceptCell(unitId, from, aim, desired, livePositions, unitsBy
     if (validCellKeys.has(HexBoard.keyOf(c.q, c.r))) options.push(c);
   });
 
-  let bestDist = Infinity;
-  options.forEach(c => {
-    const dist = HexBoard.hexDistance(c, aim);
-    if (dist < bestDist) bestDist = dist;
-  });
-  const best = options.filter(c => HexBoard.hexDistance(c, aim) === bestDist);
-
   const allyClaims = (c) => Object.keys(desired).some(other => {
     if (other === unitId) return false;
     if (unitsById[other].role !== role) return false;
     return samePos(desired[other], c) || samePos(livePositions[other], c);
   });
-  let pool = best.filter(c => !allyClaims(c));
-  if (pool.length === 0) pool = best;
 
-  pool.sort((a, b) => {
+  const bestCellsFor = (aim) => {
+    let bestDist = Infinity;
+    options.forEach(c => {
+      const dist = HexBoard.hexDistance(c, aim);
+      if (dist < bestDist) bestDist = dist;
+    });
+    return options.filter(c => HexBoard.hexDistance(c, aim) === bestDist);
+  };
+
+  const pickClosestDir = (cells) => cells.slice().sort((a, b) => {
     const ia = HexBoard.dirBetween(from, a); // -1 fuer Stehenbleiben -> zuerst
     const ib = HexBoard.dirBetween(from, b);
     return ia - ib;
-  });
-  return { q: pool[0].q, r: pool[0].r };
+  })[0];
+
+  let lastBest = null;
+  for (const aim of aims) {
+    const best = bestCellsFor(aim);
+    lastBest = best;
+    const free = best.filter(c => !allyClaims(c));
+    if (free.length > 0) return pickClosestDir(free);
+  }
+  const fallback = pickClosestDir(lastBest);
+  return { q: fallback.q, r: fallback.r };
 }
 
 // Bei einem umkaempften Feld gewinnt die Einheit mit dem hoeheren speedRank
@@ -425,6 +441,7 @@ function resolveRound(room, combinedPlan) {
   let desired = {};
   let combatEvents = [];
   let combatResolvedThisTick = new Set();
+  let arrowEvents = [];
 
   const livingOf = (id) => UnitTypes.livingUnitsFor(unitsById[id].typeKey, hp[id]);
   const areEnemies = (a, b) => unitsById[a].role !== unitsById[b].role;
@@ -502,9 +519,41 @@ function resolveRound(room, combinedPlan) {
     // Interceptor bekommen keinen Gegenschaden.
 
     const defenderDefeated = hp[defenderId] <= 0;
-    const moverId = defenderDefeated
+    let moverId = defenderDefeated
       ? pickAdvancer(attackerIds.filter(id => hp[id] > 0), dmgToDefender, unitsById)
       : null;
+
+    // Nahschuss-Sonderfall: vernichtet der Angreifer aus der Schuss-Richtung
+    // (primary-Feld) den Schuetzen und wuerde auf dessen Feld nachruecken,
+    // schlaegt der Pfeil JETZT - noch VOR dem Nachruecken, in diesem selben
+    // Takt - bei ihm ein, statt erst im eigentlich geplanten Einschlag-Takt.
+    // Kommt der Nachruecker stattdessen aus dem behind-Feld oder von woanders,
+    // bleibt es beim normalen (spaeteren) Einschlag. Stirbt der primary-
+    // Angreifer durch den Pfeil, rueckt niemand auf das Schuetzen-Feld nach.
+    if (defenderDefeated && moverId) {
+      const shot = pendingShots.find(s =>
+        s.unitId === defenderId && s.type === 'near' && s.fired && !s.cancelled && !s.resolved
+      );
+      if (shot && samePos(livePositions[moverId], shot.cells[0])) {
+        shot.resolved = true;
+        const hitUnitId = moverId;
+        const dmg = shot.livingAtLaunch * UnitTypes.rangedDamageOf('bogenschuetze', unitsById[hitUnitId].typeKey);
+        hp[hitUnitId] = Math.max(0, hp[hitUnitId] - dmg);
+        const defeated = hp[hitUnitId] <= 0;
+        if (defeated) moverId = null;
+        // Pfeil ist jetzt verbraucht - Einschlag-Ereignis SOFORT senden, damit
+        // der Pfeil beim Klienten in diesem Takt verschwindet, statt bis zum
+        // eigentlich geplanten (jetzt hinfaelligen) Einschlag-Takt weiterzufliegen.
+        arrowEvents.push({
+          id: shot.unitId + '#' + shot.launchTick,
+          kind: 'impact',
+          shotType: shot.type,
+          cells: shot.cells.map(c => ({ q: c.q, r: c.r })),
+          impactCell: { ...dCell },
+          hits: [{ unitId: hitUnitId, hpAfter: hp[hitUnitId], defeated }]
+        });
+      }
+    }
 
     desired[defenderId] = { ...dCell };
     attackerIds.forEach(id => {
@@ -786,7 +835,7 @@ function resolveRound(room, combinedPlan) {
   };
 
   for (let tick = 0; tick < totalTicks; tick++) {
-    const arrowEvents = [];
+    arrowEvents = [];
 
     // --- Bogenschuetzen-Schuesse: Abschuesse dieses Takts ---
     // "Zuerst gefeuert, dann angegriffen": der Schaden wird JETZT - vor jeder
@@ -875,8 +924,16 @@ function resolveRound(room, combinedPlan) {
         desired[unitId] = { ...livePositions[unitId] }; // Ziel weg -> stehen bleiben
         return;
       }
-      const aim = desired[targetId] || livePositions[targetId];
-      desired[unitId] = computeInterceptCell(unitId, livePositions[unitId], aim, desired, livePositions, unitsById);
+      // Zuerst dorthin, wo die Zieleinheit diesen Takt hinzieht; steht dort
+      // (nur) ein Verbuendeter im Weg, ersatzweise ans aktuelle Feld der
+      // Zieleinheit - dort greift der Abfaenger sie stattdessen an, statt
+      // sinnlos gegen die eigene Kollegen-Blockade zu laufen.
+      const primaryAim = desired[targetId] || livePositions[targetId];
+      const aims = [primaryAim];
+      if (livePositions[targetId] && !samePos(livePositions[targetId], primaryAim)) {
+        aims.push(livePositions[targetId]);
+      }
+      desired[unitId] = computeInterceptCell(unitId, livePositions[unitId], aims, desired, livePositions, unitsById);
       interceptorIds.push(unitId);
     });
 
@@ -1403,24 +1460,14 @@ io.on('connection', (socket) => {
         }
       }
 
+      // Bei Match-Ende KEIN serverseitiger Reload-Timer: der Server weiss
+      // nicht, wie lange die Runden-Animation beim Client noch laeuft, und
+      // wuerde sonst mitten in der Animation oder vor der Sieg-Anzeige neu
+      // laden lassen. Der Client laedt sich nach seinem eigenen 5s-Countdown
+      // (siehe showEndOverlay) selbst neu; das trennt dabei seinen Socket,
+      // und der Raum wird ganz normal ueber den disconnect-Handler unten
+      // aufgeraeumt, sobald beide Spieler weg sind.
       io.to(roomId).emit('executeRound', { ticks, roundResult, matchResult });
-
-      if (matchResult) {
-        setTimeout(() => {
-          const r = rooms[roomId];
-          if (!r) return;
-          io.to(roomId).emit('returnToStart');
-          Object.values(r.sockets).forEach(sid => {
-            const s = io.sockets.sockets.get(sid);
-            if (s) {
-              s.leave(roomId);
-              s.data.roomId = null;
-              s.data.role = null;
-            }
-          });
-          delete rooms[roomId];
-        }, 5000);
-      }
     }
   });
 
@@ -1448,28 +1495,16 @@ io.on('connection', (socket) => {
     }
 
     // Match ist bereits (regulaer) zu Ende und die Rueckkehr zum Start laeuft
-    // schon (siehe matchResult unten) - kein zweiter Countdown noetig.
+    // schon (siehe matchResult oben) - keine zweite Meldung noetig.
     if (room.closing) return;
     room.closing = true;
 
-    // Verbleibender Spieler bekommt die Meldung wie beim Sieg-Overlay; nach
-    // 5s wird der Raum genauso geschlossen wie nach einem regulaeren
-    // Match-Ende (returnToStart + Socket verlaesst den Raum).
+    // Verbleibender Spieler bekommt die Meldung wie beim Sieg-Overlay und
+    // laedt sich nach seinem eigenen 5s-Countdown selbst neu (siehe
+    // showEndOverlay im Client). Kein serverseitiger Timer noetig: sobald
+    // dieser letzte Socket ebenfalls die Verbindung trennt, greift oben der
+    // "beide Spieler weg" -Zweig und raeumt den Raum auf.
     io.to(roomId).emit('playerLeft');
-    setTimeout(() => {
-      const r = rooms[roomId];
-      if (!r) return;
-      io.to(roomId).emit('returnToStart');
-      Object.values(r.sockets).forEach(sid => {
-        const s = io.sockets.sockets.get(sid);
-        if (s) {
-          s.leave(roomId);
-          s.data.roomId = null;
-          s.data.role = null;
-        }
-      });
-      delete rooms[roomId];
-    }, 5000);
   });
 });
 

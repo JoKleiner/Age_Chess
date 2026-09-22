@@ -1018,8 +1018,10 @@ function showRoundBanner(roundResult) {
 }
 
 // Gemeinsames Overlay fuer "Match vorbei" (Sieg) UND "Gegner hat den Raum
-// verlassen" - beide Male mit 5s-Countdown, danach schickt der Server
-// 'returnToStart'.
+// verlassen" - beide Male mit 5s-Countdown, danach laedt die Seite sich
+// selbst neu (nicht auf ein Server-Signal warten: der Server wuesste nicht,
+// wann die Runden-Animation beim Client tatsaechlich fertig ist, und koennte
+// sonst mitten in der Animation oder noch vor der Anzeige neu laden lassen).
 function showEndOverlay(title, name) {
   victoryTitle.textContent = title;
   victoryName.textContent = name;
@@ -1029,7 +1031,10 @@ function showEndOverlay(title, name) {
   const iv = setInterval(() => {
     n -= 1;
     victoryCountdown.textContent = String(Math.max(0, n));
-    if (n <= 0) clearInterval(iv);
+    if (n <= 0) {
+      clearInterval(iv);
+      location.reload();
+    }
   }, 1000);
 }
 
@@ -1216,7 +1221,7 @@ function showPlacementFacingChooser(q, r) {
     const uy = n.y - c.y;
     const arrow = document.createElementNS(SVG_NS, 'polygon');
     const M = CHIP_RADIUS;
-    arrow.setAttribute('points', `${M * 1.75},0 ${M * 0.22},${-M * 0.9} ${M * 0.22},${M * 0.9}`);
+    arrow.setAttribute('points', `${M * 2.3},0 ${M * 0.15},${-M * 1.15} ${M * 0.15},${M * 1.15}`);
     arrow.setAttribute('transform',
       `translate(${c.x + ux * 0.55}, ${c.y + uy * 0.55}) rotate(${Math.atan2(uy, ux) * 180 / Math.PI})`);
     arrow.classList.add('placement-facing-arrow');
@@ -1278,9 +1283,20 @@ function handlePlacementChipClick(unitId, typeKey) {
 function handlePlacementClick(q, r) {
   if (placementReady) return;
 
-  // Ein Klick aufs Brett bricht eine offene Reiter-Blickrichtungs-Wahl ab.
+  // Waehrend einer offenen Reiter-Blickrichtungs-Wahl waehlt ein Klick auf
+  // eines der sechs Nachbarfelder (auf denen die Auswahl-Pfeile liegen)
+  // dieselbe Richtung wie ein Klick auf den Pfeil selbst - ein Klick knapp
+  // daneben auf das Feld statt exakt auf den (kleinen) Pfeil soll nicht die
+  // ganze Auswahl abbrechen. Nur ein Klick abseits aller Nachbarfelder bricht
+  // die Wahl ab.
   if (pendingReiterPlacement) {
-    cancelPendingReiterPlacement();
+    const { q: pq, r: pr } = pendingReiterPlacement;
+    const dirIndex = HexBoard.DIRECTIONS.findIndex(d => pq + d.dq === q && pr + d.dr === r);
+    if (dirIndex >= 0) {
+      finalizeReiterPlacement(dirIndex);
+    } else {
+      cancelPendingReiterPlacement();
+    }
     return;
   }
 
