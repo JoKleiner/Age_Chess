@@ -275,6 +275,19 @@ function isValidRolePlan(planByUnit, positions, unitsForRole, facings = {}, enem
   return true;
 }
 
+// Wie isValidRolePlan, liefert aber die erste fehlerhafte Einheit (fuer eine
+// verstaendliche Fehlermeldung) - null, wenn alles gueltig ist.
+function findInvalidRolePlanUnit(planByUnit, positions, unitsForRole, facings = {}, enemyIds = null) {
+  if (!planByUnit || typeof planByUnit !== 'object') return { label: null };
+  for (const unit of unitsForRole) {
+    if (!(unit.id in planByUnit) ||
+        !isValidUnitSteps(planByUnit[unit.id], positions[unit.id], unit.typeKey, facings[unit.id], enemyIds)) {
+      return unit;
+    }
+  }
+  return { label: null }; // z.B. Einheiten zu viel/zu wenig im Plan
+}
+
 function posKeyOf(pos) {
   return HexBoard.keyOf(pos.q, pos.r);
 }
@@ -296,7 +309,7 @@ function samePos(a, b) {
 // entscheidet der kleinste Richtungsindex (deterministisch). Bleiben wirklich
 // ALLE versuchten Ziele durchgehend belegt, wird das beste Feld des LETZTEN
 // Versuchs genommen (bestmoeglicher Kompromiss statt gar keiner Bewegung).
-function computeInterceptCell(unitId, from, aims, desired, livePositions, unitsById) {
+function computeInterceptCell(unitId, from, aims, desired, livePositions, unitsById, fightCell = null) {
   const role = unitsById[unitId].role;
   const options = [{ q: from.q, r: from.r }]; // Stehenbleiben ist erlaubt
   HexBoard.DIRECTIONS.forEach(d => {
@@ -304,10 +317,16 @@ function computeInterceptCell(unitId, from, aims, desired, livePositions, unitsB
     if (validCellKeys.has(HexBoard.keyOf(c.q, c.r))) options.push(c);
   });
 
+  // `fightCell`: Feld, auf das die Zieleinheit diesen Takt zieht. Will dort
+  // auch ein Verbuendeter HIN (nicht: steht dort), gibt es auf diesem Feld
+  // ohnehin einen Kampf gegen das Ziel - der Abfaenger zieht dann mit dorthin
+  // und kaempft mit, statt auszuweichen.
   const allyClaims = (c) => Object.keys(desired).some(other => {
     if (other === unitId) return false;
     if (unitsById[other].role !== role) return false;
-    return samePos(desired[other], c) || samePos(livePositions[other], c);
+    if (samePos(livePositions[other], c)) return true;
+    if (!samePos(desired[other], c)) return false;
+    return !(fightCell && samePos(c, fightCell));
   });
 
   const bestCellsFor = (aim) => {
@@ -423,7 +442,7 @@ function resolveRound(room, combinedPlan) {
         if (canon) {
           pendingShots.push({
             unitId, fired: false, resolved: false, cancelled: false,
-            livingAtLaunch: 0, ...canon
+            livingAtLaunch: 0, raw: steps[i].shot, ...canon
           });
         }
         break;
@@ -460,10 +479,11 @@ function resolveRound(room, combinedPlan) {
   // alle Teilnehmer erst ein Viertel Richtung `attempt` vor; danach zieht
   // `moverId` auf sein `attempt`-Feld nach, alle anderen weichen auf ihr
   // `from`-Feld zurueck, besiegte werden entfernt.
-  const buildCombatEvent = (cells, ids, partById, moverId) => {
+  const buildCombatEvent = (cells, ids, partById, moverId, arrowImpact = null) => {
     combatEvents.push({
       cells: cells.map(c => ({ q: c.q, r: c.r })),
       moverId: moverId || null,
+      arrowImpact,
       participants: ids.map(id => ({
         unitId: id,
         fromCell: { q: partById[id].from.q, r: partById[id].from.r },
@@ -530,6 +550,10 @@ function resolveRound(room, combinedPlan) {
     // Kommt der Nachruecker stattdessen aus dem behind-Feld oder von woanders,
     // bleibt es beim normalen (spaeteren) Einschlag. Stirbt der primary-
     // Angreifer durch den Pfeil, rueckt niemand auf das Schuetzen-Feld nach.
+    // Fuer die Anzeige: der Pfeil trifft im Kampf-Ereignis NACH dem
+    // Verschwinden des Schuetzen (siehe arrowImpact), deshalb zeigt das
+    // Kampf-Ereignis beim Getroffenen die HP VOR dem Pfeil.
+    let arrowImpact = null;
     if (defenderDefeated && moverId) {
       const shot = pendingShots.find(s =>
         s.unitId === defenderId && s.type === 'near' && s.fired && !s.cancelled && !s.resolved
@@ -537,6 +561,7 @@ function resolveRound(room, combinedPlan) {
       if (shot && samePos(livePositions[moverId], shot.cells[0])) {
         shot.resolved = true;
         const hitUnitId = moverId;
+        const hpBeforeArrow = hp[hitUnitId];
         const dmg = shot.livingAtLaunch * UnitTypes.rangedDamageOf('bogenschuetze', unitsById[hitUnitId].typeKey);
         hp[hitUnitId] = Math.max(0, hp[hitUnitId] - dmg);
         const defeated = hp[hitUnitId] <= 0;
@@ -544,14 +569,21 @@ function resolveRound(room, combinedPlan) {
         // Pfeil ist jetzt verbraucht - Einschlag-Ereignis SOFORT senden, damit
         // der Pfeil beim Klienten in diesem Takt verschwindet, statt bis zum
         // eigentlich geplanten (jetzt hinfaelligen) Einschlag-Takt weiterzufliegen.
+        // `deferred`: der Client zeigt diesen Einschlag NICHT am Takt-Anfang,
+        // sondern innerhalb des Kampf-Ereignisses (arrowImpact).
         arrowEvents.push({
           id: shot.unitId + '#' + shot.launchTick,
           kind: 'impact',
+          deferred: true,
           shotType: shot.type,
           cells: shot.cells.map(c => ({ q: c.q, r: c.r })),
           impactCell: { ...dCell },
           hits: [{ unitId: hitUnitId, hpAfter: hp[hitUnitId], defeated }]
         });
+        arrowImpact = {
+          arrowId: shot.unitId + '#' + shot.launchTick,
+          unitId: hitUnitId, hpBefore: hpBeforeArrow, hpAfter: hp[hitUnitId], defeated
+        };
       }
     }
 
@@ -589,22 +621,24 @@ function resolveRound(room, combinedPlan) {
     };
     attackerIds.forEach(id => {
       const hasIntercept = interceptorsOf(id).length > 0;
+      const arrowHit = arrowImpact && arrowImpact.unitId === id;
       mainPart[id] = {
-        from: { ...livePositions[id] }, attempt: dCell, hpAfter: hp[id],
-        defeated: hasIntercept ? false : hp[id] <= 0
+        from: { ...livePositions[id] }, attempt: dCell,
+        hpAfter: arrowHit ? arrowImpact.hpBefore : hp[id],
+        defeated: (hasIntercept || arrowHit) ? false : hp[id] <= 0
       };
     });
-    buildCombatEvent([dCell], [defenderId, ...attackerIds], mainPart, moverId);
+    buildCombatEvent([dCell], [defenderId, ...attackerIds], mainPart, moverId, arrowImpact);
 
-    // Je ein Ereignis pro Angreifer-Ursprungsfeld mit Interceptor. Uebersprungen
-    // wird nur der Fall, dass der Angreifer ueberlebt UND selbst siegreich
-    // vorrueckt (dann wuerde die Animation ihn kurz zurueckschnappen lassen) -
-    // sein hpAfter im Hauptereignis enthaelt den Interceptor-Schaden ohnehin.
+    // Je ein Ereignis pro Angreifer-Ursprungsfeld mit Interceptor - IMMER,
+    // auch wenn der Angreifer ueberlebt und selbst siegreich vorrueckt: sonst
+    // haetten die Interceptor unsichtbar gekaempft (Zug + evtl. spaeterer
+    // Schuss verfallen ohne Anzeige). Der Client laesst einen Sieger eines
+    // anderen Ereignisses dabei nicht zurueckweichen.
     attackerIds.forEach(aid => {
       const list = interceptorsOf(aid);
       if (!list.length) return;
       const advancer = interceptorMover[aid] || null;
-      if (hp[aid] > 0 && !advancer && aid === moverId) return;
       const originCell = { ...livePositions[aid] };
       const part = {
         [aid]: { from: originCell, attempt: dCell, hpAfter: hp[aid], defeated: hp[aid] <= 0 }
@@ -709,12 +743,11 @@ function resolveRound(room, combinedPlan) {
     buildCombatEvent([target], moverIds, mainPart, moverId);
 
     // Je ein Ereignis pro Clash-Teilnehmer-Ursprungsfeld mit Interceptor -
-    // uebersprungen nur, wenn der Teilnehmer ueberlebt UND selbst vorrueckt.
+    // IMMER (siehe resolveDefenseCombat).
     moverIds.forEach(mid => {
       const list = interceptorsOfMover(mid);
       if (!list.length) return;
       const advancer = interceptorMover[mid] || null;
-      if (hp[mid] > 0 && !advancer && mid === moverId) return;
       const originCell = { ...livePositions[mid] };
       const part = {
         [mid]: { from: originCell, attempt: target, hpAfter: hp[mid], defeated: hp[mid] <= 0 }
@@ -817,13 +850,12 @@ function resolveRound(room, combinedPlan) {
     });
     buildCombatEvent([cell1, cell2], [id1, id2], mainPart, swapMover);
 
-    // Je ein Ereignis pro Ursprungsfeld mit Interceptor - uebersprungen nur,
-    // wenn der Tauschende ueberlebt UND selbst siegreich vorrueckt.
+    // Je ein Ereignis pro Ursprungsfeld mit Interceptor - IMMER (siehe
+    // resolveDefenseCombat).
     [[id1, cell1, cell2], [id2, cell2, cell1]].forEach(([mid, originCell, attempt]) => {
       const list = interceptorsOfSwapper(mid);
       if (!list.length) return;
       const advancer = list.find(id => advanceInto[id]) || null;
-      if (hp[mid] > 0 && !advancer && mid === swapMover) return;
       const part = {
         [mid]: { from: originCell, attempt, hpAfter: hp[mid], defeated: hp[mid] <= 0 }
       };
@@ -834,8 +866,15 @@ function resolveRound(room, combinedPlan) {
     });
   };
 
+  // Geplante Aktionen, die NICHT stattfinden (mit Grund) - pro Takt an den
+  // Client, damit nichts stillschweigend verschwindet. Restzug-Verfall wird
+  // pro Einheit nur einmal gemeldet.
+  let skippedActions = [];
+  const reportedDropped = new Set();
+
   for (let tick = 0; tick < totalTicks; tick++) {
     arrowEvents = [];
+    skippedActions = [];
 
     // --- Bogenschuetzen-Schuesse: Abschuesse dieses Takts ---
     // "Zuerst gefeuert, dann angegriffen": der Schaden wird JETZT - vor jeder
@@ -845,9 +884,20 @@ function resolveRound(room, combinedPlan) {
     pendingShots.forEach(shot => {
       if (shot.fired || shot.cancelled || shot.launchTick !== tick) return;
       shot.fired = true;
-      if (deadUnits.has(shot.unitId) || foughtUnits.has(shot.unitId)) { shot.cancelled = true; return; }
+      if (deadUnits.has(shot.unitId)) { shot.cancelled = true; return; }
+      if (foughtUnits.has(shot.unitId)) {
+        shot.cancelled = true;
+        skippedActions.push({ unitId: shot.unitId, kind: 'shot', reason: 'fought' });
+        return;
+      }
       shot.livingAtLaunch = UnitTypes.livingUnitsFor(unitsById[shot.unitId].typeKey, hp[shot.unitId]);
       if (shot.livingAtLaunch <= 0) { shot.cancelled = true; return; }
+      // Der Schuetze steht evtl. nicht dort, wo er den Schuss geplant hat
+      // (z.B. vorher blockiert): Nahschuss-Richtung von der TATSAECHLICHEN
+      // Position aus anwenden; beim Weitschuss bleibt das gewaehlte Zielfeld,
+      // sofern es von hier aus noch in Reichweite ist (sonst das Original).
+      const actual = canonicalShot(shot.raw, livePositions[shot.unitId], shot.launchTick, unitsById[shot.unitId].typeKey);
+      if (actual) shot.cells = actual.cells;
       arrowEvents.push({
         id: shot.unitId + '#' + shot.launchTick,
         kind: 'launch',
@@ -902,6 +952,18 @@ function resolveRound(room, combinedPlan) {
       if (deadUnits.has(unitId)) return; // existiert nicht mehr
       if (blockedUnits.has(unitId)) {
         desired[unitId] = { ...livePositions[unitId] };
+        const dropped = combinedPlan[unitId][tick];
+        // Schuss-Schritte zaehlen nicht: der Schuss selbst feuert trotzdem
+        // (eigene Verfalls-Meldung oben, falls nicht).
+        const isAction = dropped && dropped.shot == null && (dropped.intercept != null ||
+          dropped.turn != null || !samePos(dropped, livePositions[unitId]));
+        if (isAction && !reportedDropped.has(unitId)) {
+          reportedDropped.add(unitId);
+          skippedActions.push({
+            unitId, kind: 'rest',
+            reason: foughtUnits.has(unitId) ? 'fought' : 'blocked'
+          });
+        }
         return;
       }
       const step = combinedPlan[unitId][tick];
@@ -910,7 +972,25 @@ function resolveRound(room, combinedPlan) {
         desired[unitId] = { ...livePositions[unitId] }; // vorlaeufig stehen
         return;
       }
-      desired[unitId] = step ? { q: step.q, r: step.r } : { ...livePositions[unitId] };
+      // Schritte sind im Plan absolute Felder, gemeint ist aber "bleiben" bzw.
+      // "ein Feld in Richtung X" - relativ zum vorigen geplanten Feld auf die
+      // TATSAECHLICHE Position anwenden. Sonst wuerde eine Einheit, die nach
+      // einem Abfang-Schritt woanders steht als geplant, beim folgenden
+      // "bleiben"-Schritt auf ihr altes Planfeld zurueckspringen.
+      if (!step) {
+        desired[unitId] = { ...livePositions[unitId] };
+        return;
+      }
+      const prevPlanned = tick > 0 && combinedPlan[unitId][tick - 1]
+        ? combinedPlan[unitId][tick - 1]
+        : room.positions[unitId];
+      const next = {
+        q: livePositions[unitId].q + (step.q - prevPlanned.q),
+        r: livePositions[unitId].r + (step.r - prevPlanned.r)
+      };
+      desired[unitId] = validCellKeys.has(HexBoard.keyOf(next.q, next.r))
+        ? next
+        : { ...livePositions[unitId] };
     });
 
     // Determinstische Reihenfolge, damit der Verbuendeten-Tie-Break (ein
@@ -922,6 +1002,7 @@ function resolveRound(room, combinedPlan) {
         && livePositions[targetId] && hp[targetId] > 0;
       if (!targetAlive) {
         desired[unitId] = { ...livePositions[unitId] }; // Ziel weg -> stehen bleiben
+        skippedActions.push({ unitId, kind: 'intercept', reason: 'targetGone' });
         return;
       }
       // Zuerst dorthin, wo die Zieleinheit diesen Takt hinzieht; steht dort
@@ -933,7 +1014,11 @@ function resolveRound(room, combinedPlan) {
       if (livePositions[targetId] && !samePos(livePositions[targetId], primaryAim)) {
         aims.push(livePositions[targetId]);
       }
-      desired[unitId] = computeInterceptCell(unitId, livePositions[unitId], aims, desired, livePositions, unitsById);
+      // Zieht das Ziel wirklich um, ist sein Zielfeld ein Kampf-Feld.
+      const fightCell = desired[targetId] && !samePos(desired[targetId], livePositions[targetId])
+        ? desired[targetId]
+        : null;
+      desired[unitId] = computeInterceptCell(unitId, livePositions[unitId], aims, desired, livePositions, unitsById, fightCell);
       interceptorIds.push(unitId);
     });
 
@@ -1207,7 +1292,8 @@ function resolveRound(room, combinedPlan) {
       interceptors: interceptorIds,
       blockedAttempts,
       combatEvents,
-      arrowEvents
+      arrowEvents,
+      skippedActions
     });
   }
 
@@ -1400,7 +1486,10 @@ io.on('connection', (socket) => {
       room.units.filter(u => u.role === enemyRole && room.hp[u.id] > 0).map(u => u.id)
     );
     if (!isValidRolePlan(plan, room.positions, unitsForRole, room.facings || {}, enemyIds)) {
-      socket.emit('planRejected', { reason: 'Ungültiger Zug.' });
+      const bad = findInvalidRolePlanUnit(plan, room.positions, unitsForRole, room.facings || {}, enemyIds);
+      socket.emit('planRejected', {
+        reason: bad.label ? `Ungültiger Zug für ${bad.label}.` : 'Ungültiger Zug.'
+      });
       return;
     }
 
@@ -1518,4 +1607,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { resolveRound, buildUnitsAndPositions };
+module.exports = { resolveRound, buildUnitsAndPositions, isValidUnitSteps };

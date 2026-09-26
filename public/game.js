@@ -134,6 +134,12 @@ function initBoard() {
 const pathGroup = document.createElementNS(SVG_NS, 'g');
 svg.appendChild(pathGroup);
 
+// Hinweis-Markierungen fuer die Konflikt-Abhandlung (anstehende/naechste
+// Kaempfe und Blockaden) - ueber dem Brett, aber unter den Einheiten.
+const cueLayer = document.createElementNS(SVG_NS, 'g');
+cueLayer.style.pointerEvents = 'none';
+svg.appendChild(cueLayer);
+
 // Eigene Ebenen fuer Einheiten-Chips und HP-Baelken (statt direkt an <svg>
 // zu haengen): SVG zeichnet in DOM-Reihenfolge, hpBarLayer liegt daher IMMER
 // ueber allen Chips, unabhaengig davon, wann welche Einheit erzeugt wurde -
@@ -1068,6 +1074,7 @@ function enterPlacementAgain(nextRound) {
   hp = {};
   facings = {};
   pathGroup.innerHTML = '';
+  cueLayer.innerHTML = '';
   arrowLayer.innerHTML = '';
   facingLayer.innerHTML = '';
   placementFacingLayer.innerHTML = '';
@@ -1264,6 +1271,16 @@ function handlePlacementChipClick(unitId, typeKey) {
   const list = placedByType[typeKey] || [];
   const clickedIndex = list.findIndex(p => p.unitId === unitId);
   if (clickedIndex === -1) return;
+
+  // Offene Reiter-Blickrichtungs-Wahl: Klick auf eine platzierte Einheit zaehlt
+  // wie ein Klick auf ihr Feld (Nachbarfeld = diese Richtung waehlen, sonst
+  // Wahl abbrechen) - sie darf dabei NICHT zurueckgenommen werden, sonst
+  // passt der chipIndex der offenen Platzierung nicht mehr.
+  if (pendingReiterPlacement) {
+    const { q, r } = list[clickedIndex];
+    handlePlacementClick(q, r);
+    return;
+  }
 
   // Klick auf eine platzierte Einheit nimmt sie und alle danach platzierten
   // Einheiten derselben Art zurück auf den Stapel (Stapel-Reihenfolge bleibt
@@ -1464,6 +1481,76 @@ function updateHpBar(unitId) {
   bar.group.classList.remove('hidden');
 }
 
+// Weicher HP-Abzug: statt die Segmente schlagartig umzuschalten, blitzt der
+// Chip kurz auf, der Balken erscheint, und jedes verlorene Segment leuchtet
+// nacheinander (von rechts nach links) rot auf und verblasst dann. Dazu
+// steigt eine "−N"-Zahl (verlorene Einzel-Einheiten) ueber dem Balken auf.
+// Setzt hp[unitId] auf hpAfter; das Promise endet nach `duration` ms.
+async function animateHpDrain(unitId, hpAfter, duration) {
+  const unit = unitsById[unitId];
+  const bar = hpBarElements[unitId];
+  if (!unit || hp[unitId] == null) return;
+
+  const livingBefore = UnitTypes.livingUnitsFor(unit.typeKey, hp[unitId]);
+  const tookDamage = hpAfter < hp[unitId];
+  hp[unitId] = hpAfter;
+  if (!bar || !tookDamage) { updateHpBar(unitId); return; }
+
+  const livingAfter = UnitTypes.livingUnitsFor(unit.typeKey, hpAfter);
+  const lost = livingBefore - livingAfter;
+
+  const chip = unitElements[unitId];
+  if (chip) {
+    chip.classList.remove('unit-hit');
+    void getComputedStyle(chip).animationName; // Animation neu starten, falls mehrfach getroffen
+    chip.classList.add('unit-hit');
+    setTimeout(() => chip.classList.remove('unit-hit'), HP_HIT_FLASH_DURATION);
+  }
+
+  // Balken mit dem ALTEN Stand einblenden, dann Segment fuer Segment abbauen.
+  bar.segments.forEach((segment, i) => {
+    segment.classList.remove('hp-bar-dying');
+    segment.classList.toggle('hp-bar-dead', i >= livingBefore);
+  });
+  bar.group.classList.remove('hidden');
+  bar.group.classList.add('hp-bar-hit');
+  setTimeout(() => bar.group.classList.remove('hp-bar-hit'), duration);
+
+  if (lost > 0) spawnDamageLabel(unitId, lost);
+
+  const step = lost > 0 ? Math.min(HP_SEGMENT_STEP_MAX, (duration - HP_SEGMENT_FADE) / lost) : 0;
+  for (let k = 0; k < lost; k++) {
+    const segment = bar.segments[livingBefore - 1 - k];
+    setTimeout(() => {
+      segment.classList.add('hp-bar-dying');
+      setTimeout(() => {
+        segment.classList.remove('hp-bar-dying');
+        segment.classList.add('hp-bar-dead');
+      }, HP_SEGMENT_FADE);
+    }, k * step);
+  }
+  await wait(duration);
+  updateHpBar(unitId);
+}
+
+// Aufsteigende, verblassende "−N"-Zahl ueber dem HP-Balken einer Einheit.
+function spawnDamageLabel(unitId, lostUnits) {
+  const bar = hpBarElements[unitId];
+  if (!bar) return;
+  // Aeussere Gruppe positioniert (transform-Attribut), der Text selbst wird
+  // per CSS-Animation verschoben - beides am selben Element wuerde sich
+  // gegenseitig ueberschreiben.
+  const holder = document.createElementNS(SVG_NS, 'g');
+  holder.setAttribute('transform', bar.group.getAttribute('transform') || '');
+  const label = document.createElementNS(SVG_NS, 'text');
+  label.classList.add('damage-label');
+  label.textContent = `−${lostUnits}`;
+  label.setAttribute('y', -HP_BAR_HEIGHT * 1.5);
+  holder.appendChild(label);
+  hpBarLayer.appendChild(holder);
+  setTimeout(() => holder.remove(), DAMAGE_LABEL_DURATION);
+}
+
 // Positioniert Chip UND HP-Balken gemeinsam - wird sowohl fuer die normale
 // Zielposition (renderUnit) als auch fuer Zwischenschritte (Viertel-Bewegung
 // bei Blockaden/Kaempfen) verwendet, damit der Balken dem Chip immer folgt
@@ -1552,7 +1639,9 @@ function closePlanning() {
 }
 
 function currentUnitPlan() {
-  return myPlans[selectedUnitId] || [];
+  if (!selectedUnitId) return [];
+  if (!Array.isArray(myPlans[selectedUnitId])) myPlans[selectedUnitId] = [];
+  return myPlans[selectedUnitId];
 }
 
 // Maximale Anzahl ECHTER Bewegungen (Feldwechsel) fuer die ausgewaehlte
@@ -2215,22 +2304,41 @@ const FACING_SNAP_LEAD = 160;
 // Pause zwischen dem Viertel-Schritt aller anderen Einheiten und dem
 // Viertel-Schritt der Abfaenger (Schwert/Speerkaempfer), damit die Reihenfolge
 // "erst die anderen, dann die Abfaenger" sichtbar wird.
-const INTERCEPT_STAGE_GAP = 220;
+const INTERCEPT_STAGE_GAP = 600;
+// Dauer der gestuften Teil-Schritte (erst alle anderen, dann die Abfaenger) -
+// bewusst langsamer als die normale Bewegung, damit die Reihenfolge klar wird.
+const STAGE_MOVE_DURATION = 450;
+// Wie lange die Abfaenger auf ihrem Teil-Schritt stehen, bevor die Aktionen
+// (Schaden, wer aufs Feld darf, ...) beginnen.
+const INTERCEPT_STAGE_HOLD = 500;
 // "Der Takt pausiert": alle Einheiten stehen auf ihrem Viertel-Schritt, bevor
 // die Problemfaelle (Blockaden/Kaempfe) nacheinander abgehandelt werden -
 // macht sichtbar, wo es diesen Takt einen Konflikt gibt.
-const TICK_PAUSE_HOLD = 450;
+const TICK_PAUSE_HOLD = 700;
+// Vorankuendigung: so lange pulsiert das Feld (plus Leuchten der beteiligten
+// Einheiten) der NAECHSTEN Aktion, bevor sie tatsaechlich abgehandelt wird.
+const CUE_ANNOUNCE_HOLD = 1000;
 // Wie lange das gelbe Blockade-Feld sichtbar steht, BEVOR die blockierte
 // Einheit von ihrem Viertel-Schritt wieder zurueckgeht.
-const BLOCK_MARK_HOLD = 500;
+const BLOCK_MARK_HOLD = 800;
 // Wie lange das rote Kampf-Feld sichtbar steht, BEVOR HP/Marken aktualisiert
 // und unterlegene/besiegte Bataillone zurueckgeschickt bzw. entfernt werden.
-const COMBAT_MARK_HOLD = 500;
+const COMBAT_MARK_HOLD = 800;
+// Dauer des weichen HP-Abzugs (siehe animateHpDrain) und kurze Pause danach,
+// damit man den neuen Stand noch sieht, bevor sich etwas bewegt.
+const HP_DRAIN_DURATION = 1200;
+const HP_AFTER_HOLD = 500;
+const HP_HIT_FLASH_DURATION = 600;
+const HP_SEGMENT_STEP_MAX = 220;   // max. Abstand zwischen zwei verlorenen Segmenten
+const HP_SEGMENT_FADE = 350;       // rotes Aufleuchten eines Segments, bevor es erlischt
+const DAMAGE_LABEL_DURATION = 1400;
+// Rueckzug der Unterlegenen vom Viertel-Schritt auf ihr Feld.
+const RETREAT_MOVE_DURATION = 450;
 // Wie lange das Ausblenden eines besiegten Bataillons dauert.
-const DEFEAT_FADE_DURATION = 500;
+const DEFEAT_FADE_DURATION = 900;
 // Pause NACH einem abgehandelten Kampf, bevor der naechste (falls mehrere
 // im selben Takt) beginnt - damit jeder Kampf einzeln nachvollziehbar bleibt.
-const COMBAT_GAP_DURATION = 600;
+const COMBAT_GAP_DURATION = 700;
 // Pause nach Abschluss eines Takts, bevor der naechste beginnt.
 const TICK_PAUSE_AFTER = 400;
 
@@ -2280,9 +2388,9 @@ async function animateBlockedAttempt(attempt) {
   if (cellEl) cellEl.classList.add('blocked-cell');
   await wait(BLOCK_MARK_HOLD);
 
-  setMoveDuration(unitId, QUARTER_MOVE_DURATION);
+  setMoveDuration(unitId, RETREAT_MOVE_DURATION);
   renderUnit(unitId); // Transition vom Viertel-Schritt zurueck auf restPos
-  await wait(QUARTER_MOVE_DURATION);
+  await wait(RETREAT_MOVE_DURATION);
 
   if (cellEl) cellEl.classList.remove('blocked-cell');
   setMoveDuration(unitId, BASE_MOVE_DURATION);
@@ -2298,33 +2406,156 @@ async function animateBlockedAttempt(attempt) {
 // Ursprungsfeld; besiegte Bataillone werden danach endgueltig entfernt.
 // animateRound ruft dies fuer mehrere Kaempfe desselben Takts NACHEINANDER
 // auf, genau wie bei mehreren Blockaden.
-async function animateCombatEvent(event) {
+async function animateCombatEvent(event, tickWinners = new Set()) {
   const { cells, participants, moverId } = event;
 
   const cellEls = [...new Set(cells.map(c => hexElements[HexBoard.keyOf(c.q, c.r)]))].filter(Boolean);
   cellEls.forEach(el => el.classList.add('combat-cell'));
   await wait(COMBAT_MARK_HOLD);
 
-  participants.forEach(p => {
-    if (hp[p.unitId] == null) return;
-    hp[p.unitId] = p.hpAfter;
-    updateHpBar(p.unitId);
-  });
+  await Promise.all(participants.map(p => animateHpDrain(p.unitId, p.hpAfter, HP_DRAIN_DURATION)));
+  await wait(HP_AFTER_HOLD);
+
+  // Nahschuss-Sonderfall: der Schuetze wurde vernichtet und der Angreifer aus
+  // der Schuss-Richtung rueckt nach. Reihenfolge: Schuetze verschwindet ->
+  // Pfeil fliegt auf den halb vorgerueckten Angreifer und macht Schaden ->
+  // (Phase 3) der Angreifer rueckt ganz auf das Schuetzen-Feld.
+  if (event.arrowImpact) {
+    const early = participants.filter(p => p.defeated && unitsById[p.unitId]);
+    early.forEach(p => removeDefeatedUnit(p.unitId));
+    if (early.length > 0) await wait(DEFEAT_FADE_DURATION);
+    const hitPart = participants.find(p => p.unitId === event.arrowImpact.unitId);
+    await animateDeferredArrowHit(event.arrowImpact, hitPart);
+  }
 
   // Alle Teilnehmer ausser dem Gewinner gehen von ihrem Viertel-Schritt
   // zurueck auf ihr eigenes (unveraendertes) Feld - positions[] steht dafuer
   // noch auf dem Vor-Takt-Wert.
+  // Wer in einem ANDEREN Ereignis dieses Takts siegreich vorrueckt (z.B.
+  // Angreifer, der zusaetzlich auf seinem Ursprungsfeld abgefangen wurde),
+  // weicht hier nicht zurueck - er rueckt in Phase 3 nach.
   const retreatIds = participants
-    .filter(p => p.unitId !== moverId && !p.defeated)
+    .filter(p => p.unitId !== moverId && !p.defeated && !tickWinners.has(p.unitId) && unitsById[p.unitId])
     .map(p => p.unitId);
-  retreatIds.forEach(id => setMoveDuration(id, QUARTER_MOVE_DURATION));
+  retreatIds.forEach(id => setMoveDuration(id, RETREAT_MOVE_DURATION));
   retreatIds.forEach(id => renderUnit(id));
-  if (retreatIds.length > 0) await wait(QUARTER_MOVE_DURATION);
+  if (retreatIds.length > 0) await wait(RETREAT_MOVE_DURATION);
   retreatIds.forEach(id => setMoveDuration(id, BASE_MOVE_DURATION));
 
-  cellEls.forEach(el => el.classList.remove('combat-cell'));
+  const defeated = participants.filter(p => p.defeated && unitsById[p.unitId]);
+  defeated.forEach(p => removeDefeatedUnit(p.unitId));
+  if (defeated.length > 0) await wait(DEFEAT_FADE_DURATION);
 
-  participants.forEach(p => { if (p.defeated) removeDefeatedUnit(p.unitId); });
+  cellEls.forEach(el => el.classList.remove('combat-cell'));
+}
+
+// Pfeil (schon im Flug, siehe spawnArrow) fliegt auf die halb vorgerueckte
+// Einheit, Treffer mit weichem HP-Abzug; wird sie besiegt, verschwindet sie.
+async function animateDeferredArrowHit(impact, hitPart) {
+  const a = activeArrows[impact.arrowId];
+  const from = positions[impact.unitId];
+  if (a && from && hitPart) {
+    const pt = pointAtFraction(from, hitPart.attemptCell, 0.25);
+    a.el.style.transitionDuration = `${RETREAT_MOVE_DURATION}ms`;
+    setArrowTransform(a, pt.x, pt.y);
+    await wait(RETREAT_MOVE_DURATION);
+  }
+  if (a) {
+    a.el.remove();
+    delete activeArrows[impact.arrowId];
+  }
+  await animateHpDrain(impact.unitId, impact.hpAfter, HP_DRAIN_DURATION);
+  await wait(HP_AFTER_HOLD);
+  if (impact.defeated && unitsById[impact.unitId]) {
+    removeDefeatedUnit(impact.unitId);
+    await wait(DEFEAT_FADE_DURATION);
+  }
+}
+
+// ---------- Entfallene Aktionen ----------
+
+const SKIPPED_NOTICE_HOLD = 1600;
+
+function skippedActionText(a) {
+  if (a.kind === 'shot') return 'Schuss entfällt (war im Kampf)';
+  return 'Abfangen entfällt (Ziel weg)';
+}
+
+// Kleine Hinweis-Schilder ueber den betroffenen Einheiten, alle gleichzeitig.
+async function showSkippedActions(actions) {
+  const notices = [];
+  actions.forEach(a => {
+    const pos = positions[a.unitId];
+    if (!pos || !unitElements[a.unitId]) return;
+    const { x, y } = toScreen(pos.q, pos.r);
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.classList.add('skip-notice');
+    g.setAttribute('transform', `translate(${x}, ${y - UNIT_CHIP_SIZE * 0.95})`);
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    const text = document.createElementNS(SVG_NS, 'text');
+    text.textContent = skippedActionText(a);
+    g.appendChild(rect);
+    g.appendChild(text);
+    arrowLayer.appendChild(g);
+    const box = text.getBBox();
+    const pad = 3;
+    rect.setAttribute('x', box.x - pad);
+    rect.setAttribute('y', box.y - pad);
+    rect.setAttribute('width', box.width + pad * 2);
+    rect.setAttribute('height', box.height + pad * 2);
+    rect.setAttribute('rx', 3);
+    notices.push(g);
+    unitElements[a.unitId].classList.add('unit-skipped');
+  });
+  if (notices.length === 0) return;
+  await wait(SKIPPED_NOTICE_HOLD);
+  notices.forEach(g => g.remove());
+  actions.forEach(a => {
+    const el = unitElements[a.unitId];
+    if (el) el.classList.remove('unit-skipped');
+  });
+}
+
+// ---------- Vorankuendigung der Konflikt-Aktionen ----------
+
+// Umriss-Polygon ueber einem Feld in der cueLayer. kind: 'pending' (steht in
+// diesem Takt noch an), 'next-combat' / 'next-block' (kommt als naechstes).
+function addCellCue(cell, kind) {
+  const cellEl = hexElements[HexBoard.keyOf(cell.q, cell.r)];
+  if (!cellEl) return null;
+  const poly = document.createElementNS(SVG_NS, 'polygon');
+  poly.setAttribute('points', cellEl.getAttribute('points'));
+  poly.classList.add('cell-cue', `cell-cue-${kind}`);
+  cueLayer.appendChild(poly);
+  return poly;
+}
+
+// Zeichnet die gestrichelten "steht noch an"-Umrisse fuer alle noch nicht
+// abgehandelten Aktionen neu (ein Feld nur einmal, auch wenn es mehrfach
+// umkaempft wird).
+function showPendingCues(actions) {
+  cueLayer.querySelectorAll('.cell-cue-pending').forEach(el => el.remove());
+  const seen = new Set();
+  actions.forEach(a => a.cells.forEach(c => {
+    const key = HexBoard.keyOf(c.q, c.r);
+    if (seen.has(key)) return;
+    seen.add(key);
+    addCellCue(c, 'pending');
+  }));
+}
+
+// Kuendigt die naechste Aktion an: ihr Feld pulsiert kraeftig, die
+// beteiligten Einheiten leuchten auf. Gibt eine Aufraeum-Funktion zurueck, die
+// nach der Aktion aufgerufen wird.
+async function announceAction(action) {
+  const cues = action.cells.map(c => addCellCue(c, `next-${action.kind}`)).filter(Boolean);
+  const chips = action.unitIds.map(id => unitElements[id]).filter(Boolean);
+  chips.forEach(el => el.classList.add('unit-cue'));
+  await wait(CUE_ANNOUNCE_HOLD);
+  return () => {
+    cues.forEach(el => el.remove());
+    chips.forEach(el => el.classList.remove('unit-cue'));
+  };
 }
 
 // ---------- Fliegende Pfeile (Bogenschuetzen-Beschuss) ----------
@@ -2347,6 +2578,13 @@ function setArrowTransform(a, x, y) {
 // in Flugrichtung. fromPos wird entsprechend verschoben, damit auch die
 // weitere Flugbahn (advanceArrows) von diesem Punkt aus interpoliert.
 const ARROW_SPAWN_LEAD = 0.12;
+// Abschuss: so lange steht der Pfeil nach dem Aufblitzen sichtbar beim
+// Schuetzen, bevor irgendetwas anderes passiert.
+const ARROW_LAUNCH_HOLD = 1000;
+// Flug-Abschnitt pro Takt (Pfeile, die noch unterwegs sind).
+const ARROW_FLIGHT_DURATION = 900;
+// Letztes Stueck bis zur Einschlagstelle.
+const ARROW_IMPACT_APPROACH = 500;
 
 // Kurzer, deutlicher "Abschuss-Blitz" am Startpunkt des Pfeils.
 function spawnArrowBurst(x, y) {
@@ -2356,7 +2594,7 @@ function spawnArrowBurst(x, y) {
   ring.setAttribute('r', ARROW_RADIUS);
   ring.classList.add('arrow-burst');
   arrowLayer.appendChild(ring);
-  setTimeout(() => ring.remove(), 500);
+  setTimeout(() => ring.remove(), 900);
 }
 
 // Neuen Pfeil erzeugen: kleine Pfeil-Form kurz vor dem Schuetzen-Feld, in
@@ -2388,15 +2626,19 @@ function spawnArrow(ev) {
 }
 
 // Alle fliegenden Pfeile auf ihren Bruchteil des Wegs fuer diesen Takt setzen.
+// Gibt zurueck, ob sich dabei ein Pfeil tatsaechlich weiterbewegt hat.
 function advanceArrows(tick) {
+  let moved = false;
   Object.values(activeArrows).forEach(a => {
     if (a.arrivalTick === tick) return; // Einschlag positioniert selbst
     const span = Math.max(1, a.arrivalTick - a.launchTick);
     const frac = Math.max(0, Math.min(1, (tick - a.launchTick) / span));
+    if (frac > 0) moved = true;
     const pt = pointAtFraction(a.fromPos, a.toPos, frac);
-    a.el.style.transitionDuration = `${BASE_MOVE_DURATION}ms`;
+    a.el.style.transitionDuration = `${ARROW_FLIGHT_DURATION}ms`;
     setArrowTransform(a, pt.x, pt.y);
   });
+  return moved;
 }
 
 function clearArrows() {
@@ -2414,9 +2656,9 @@ async function animateArrowImpact(ev) {
 
   if (a) {
     const pt = toScreen(landing.q, landing.r);
-    a.el.style.transitionDuration = `${QUARTER_MOVE_DURATION}ms`;
+    a.el.style.transitionDuration = `${ARROW_IMPACT_APPROACH}ms`;
     setArrowTransform(a, pt.x, pt.y);
-    await wait(QUARTER_MOVE_DURATION);
+    await wait(ARROW_IMPACT_APPROACH);
   }
 
   let impactEl = null;
@@ -2426,13 +2668,11 @@ async function animateArrowImpact(ev) {
   }
   await wait(COMBAT_MARK_HOLD);
 
-  ev.hits.forEach(h => {
-    if (hp[h.unitId] == null) return;
-    hp[h.unitId] = h.hpAfter;
-    updateHpBar(h.unitId);
-  });
-  await wait(200);
-  ev.hits.forEach(h => { if (h.defeated) removeDefeatedUnit(h.unitId); });
+  await Promise.all(ev.hits.map(h => animateHpDrain(h.unitId, h.hpAfter, HP_DRAIN_DURATION)));
+  await wait(HP_AFTER_HOLD);
+  const defeated = ev.hits.filter(h => h.defeated && unitsById[h.unitId]);
+  defeated.forEach(h => removeDefeatedUnit(h.unitId));
+  if (defeated.length > 0) await wait(DEFEAT_FADE_DURATION);
 
   if (impactEl) impactEl.classList.remove('arrow-impact-cell');
   if (a) {
@@ -2445,32 +2685,18 @@ async function animateRound(ticks) {
   tickDisplay.classList.add('tick-visible');
 
   for (let tick = 0; tick < ticks.length; tick++) {
-    tickDisplay.textContent = `Takt ${tick + 1} von ${ticks.length}`;
+    const tickLabel = `Takt ${tick + 1} von ${ticks.length}`;
+    tickDisplay.textContent = tickLabel;
     await wait(TICK_LABEL_DELAY);
 
-    const { positions: tickPositions, facings: tickFacings, blockedAttempts, combatEvents, arrowEvents = [] } = ticks[tick];
+    const { positions: tickPositions, facings: tickFacings, blockedAttempts, combatEvents, arrowEvents = [], skippedActions = [] } = ticks[tick];
 
-    // Reiter, die sich diesen Takt bewegen: Blickrichtung SOFORT (ohne
-    // Transition) auf die Bewegungsrichtung "teleportieren" - danach gleiten
-    // Chip UND Dreieck 100% synchron aufs naechste Feld (setMoveDuration setzt
-    // beiden dieselbe Transition-Dauer). Reine Dreh-Schritte ohne Feldwechsel
-    // bleiben ausgenommen und drehen sich am Takt-Ende sanft in der CSS-Transition.
-    let snappedAny = false;
-    if (tickFacings) {
-      Object.keys(facingMarkers).forEach(unitId => {
-        const to = tickPositions[unitId];
-        const from = positions[unitId];
-        if (!to || !from || tickFacings[unitId] == null) return;
-        if (samePos(to, from)) return;
-        if (facings[unitId] !== tickFacings[unitId]) {
-          facings[unitId] = tickFacings[unitId];
-          snapFacingMarker(unitId);
-          snappedAny = true;
-        }
-      });
-    }
-    // Dreieck-Ausrichtung kurz sacken lassen, bevor die Bewegung startet.
-    if (snappedAny) await wait(FACING_SNAP_LEAD);
+    // Geplante Aktionen, die diesen Takt entfallen (z.B. Schuss nach einem
+    // Kampf) - sichtbar ansagen statt stillschweigend zu ueberspringen.
+    // "Weitere Takte entfallen" (kind 'rest') wird bewusst NICHT angezeigt -
+    // nur konkret entfallende Aktionen (Schuss, Abfangen).
+    const visibleSkips = skippedActions.filter(a => a.kind !== 'rest');
+    if (visibleSkips.length > 0) await showSkippedActions(visibleSkips);
 
     // Reine Dreh-Schritte (Figur bleibt auf ihrem Feld, "Drehen"-Aktion) sollen
     // sich zum SELBEN Zeitpunkt drehen wie sich andere Figuren diesen Takt
@@ -2493,13 +2719,17 @@ async function animateRound(ticks) {
 
     // Pfeile: neue abschiessen, fliegende weiterbewegen, Einschlaege zuerst
     // abhandeln (Server rechnet Pfeilschaden VOR Bewegung/Nahkampf des Takts).
-    arrowEvents.forEach(ev => { if (ev.kind === 'launch') spawnArrow(ev); });
-    advanceArrows(tick);
+    // Erst schiessen, dann Bewegung: Abschuss sichtbar stehen lassen und den
+    // Flug-Abschnitt dieses Takts abwarten, BEVOR sich Einheiten bewegen.
+    const launches = arrowEvents.filter(ev => ev.kind === 'launch');
+    launches.forEach(ev => spawnArrow(ev));
+    if (launches.length > 0) await wait(ARROW_LAUNCH_HOLD);
+    if (advanceArrows(tick)) await wait(ARROW_FLIGHT_DURATION);
     // Alle Einschlaege dieses Takts GLEICHZEITIG: die Pfeile sollen zusammen
     // ankommen, nicht nacheinander.
     await Promise.all(
       arrowEvents
-        .filter(ev => ev.kind === 'impact')
+        .filter(ev => ev.kind === 'impact' && !ev.deferred) // verzoegerte: im Kampf-Ereignis
         .map(ev => animateArrowImpact(ev))
     );
 
@@ -2507,9 +2737,12 @@ async function animateRound(ticks) {
     // im Kampf unterlegen/gleichstehend) und deshalb NICHT mehr in Phase 3
     // ihre Bewegung zu Ende fuehren sollen - ein Kampf-Gewinner (moverId)
     // gehoert NICHT dazu, er wird ganz normal in Phase 3 fertig bewegt.
+    const tickWinners = new Set(combatEvents.map(ev => ev.moverId).filter(Boolean));
     const handledIds = new Set(blockedAttempts.map(a => a.unitId));
     combatEvents.forEach(ev => {
-      ev.participants.forEach(p => { if (p.unitId !== ev.moverId) handledIds.add(p.unitId); });
+      ev.participants.forEach(p => {
+        if (p.unitId !== ev.moverId && !tickWinners.has(p.unitId)) handledIds.add(p.unitId);
+      });
     });
 
     // Zielfeld dieses Takts fuer jede Einheit, die ueberhaupt etwas
@@ -2531,11 +2764,33 @@ async function animateRound(ticks) {
       });
     });
     const attemptingIds = Object.keys(attemptTargets);
+
+    // Reiter, die diesen Takt einen Schritt VERSUCHEN (egal ob er gelingt,
+    // blockiert wird oder im Kampf endet): Blickrichtung direkt VOR der halben
+    // bzw. ganzen Bewegung SOFORT (ohne Transition) auf die Bewegungsrichtung
+    // "teleportieren" - danach gleiten Chip UND Dreieck synchron. Gelingt der
+    // Schritt nicht, setzt das Takt-Ende die Blickrichtung wieder auf den
+    // Server-Stand (tickFacings). Reine Dreh-Schritte ohne Feldwechsel bleiben
+    // ausgenommen (siehe oben).
+    let snappedAny = false;
+    attemptingIds.forEach(unitId => {
+      if (!facingMarkers[unitId] || !positions[unitId]) return;
+      const dir = HexBoard.dirBetween(positions[unitId], attemptTargets[unitId]);
+      if (dir < 0 || facings[unitId] === dir) return;
+      facings[unitId] = dir;
+      snapFacingMarker(unitId);
+      snappedAny = true;
+    });
+    // Dreieck-Ausrichtung kurz sacken lassen, bevor die Bewegung startet.
+    if (snappedAny) await wait(FACING_SNAP_LEAD);
     const interceptorSet = new Set(ticks[tick].interceptors || []);
     const hasConflict = blockedAttempts.length > 0 || combatEvents.length > 0;
 
-    if (hasConflict || interceptorSet.size > 0) {
-      // Konflikt-Takt ODER Abfang-Takt: gestufte Vor-Bewegung. Reihenfolge -
+    // Nur in Takten MIT Aktion (Blockade/Kampf) gestuft - ohne Aktion laufen
+    // alle (auch Abfaenger) direkt komplett durch, damit man einem reinen
+    // Abfang-Schritt nicht ansieht, dass abgefangen wurde.
+    if (hasConflict) {
+      // Konflikt-Takt: gestufte Vor-Bewegung. Reihenfolge -
       // erst ruecken ALLE Nicht-Abfaenger einen Viertel-Schritt vor, DANN die
       // Abfaenger (Schwert/Speerkaempfer) einen Viertel-Schritt auf ihr serverseitig
       // berechnetes Feld; erst danach folgen Begegnungen + Rest-Bewegungen.
@@ -2544,33 +2799,65 @@ async function animateRound(ticks) {
 
       // Phase 1a: alle Nicht-Abfaenger einen Viertel-Schritt vor.
       others.forEach(unitId => {
-        setMoveDuration(unitId, QUARTER_MOVE_DURATION);
+        setMoveDuration(unitId, STAGE_MOVE_DURATION);
         const quarter = pointAtFraction(positions[unitId], attemptTargets[unitId], 0.25);
         moveUnitTo(unitId, quarter.x, quarter.y);
       });
-      if (others.length > 0) await wait(QUARTER_MOVE_DURATION);
+      if (others.length > 0) await wait(STAGE_MOVE_DURATION);
 
-      // Phase 1b: erst DANACH die Abfaenger einen Viertel-Schritt vor.
+      // Phase 1b: erst DANACH die Abfaenger einen Viertel-Schritt vor - sie
+      // leuchten dabei auf und die Takt-Anzeige nennt die Abfang-Stufe.
       if (interceptors.length > 0) {
         await wait(INTERCEPT_STAGE_GAP);
+        tickDisplay.textContent = `${tickLabel} · Abfangen`;
+        const interceptorChips = interceptors.map(id => unitElements[id]).filter(Boolean);
+        interceptorChips.forEach(el => el.classList.add('unit-cue'));
         interceptors.forEach(unitId => {
-          setMoveDuration(unitId, QUARTER_MOVE_DURATION);
+          setMoveDuration(unitId, STAGE_MOVE_DURATION);
           const quarter = pointAtFraction(positions[unitId], attemptTargets[unitId], 0.25);
           moveUnitTo(unitId, quarter.x, quarter.y);
         });
-        await wait(QUARTER_MOVE_DURATION);
+        await wait(STAGE_MOVE_DURATION + INTERCEPT_STAGE_HOLD);
+        interceptorChips.forEach(el => el.classList.remove('unit-cue'));
+        tickDisplay.textContent = tickLabel;
       }
 
-      if (hasConflict) await wait(TICK_PAUSE_HOLD); // Takt pausiert - Konflikte werden sichtbar
-
-      // Phase 2: Problemfaelle (Blockaden, dann Kaempfe) nacheinander abhandeln.
-      for (const attempt of blockedAttempts) {
-        await animateBlockedAttempt(attempt);
+      // Phase 2: Problemfaelle (Blockaden, dann Kaempfe) nacheinander
+      // abhandeln. Beim Pausieren werden ALLE anstehenden Konfliktfelder
+      // gestrichelt umrandet; vor jeder einzelnen Aktion pulsiert dann ihr
+      // Feld, die Beteiligten leuchten auf und die Takt-Anzeige nennt sie.
+      const actions = [
+        ...blockedAttempts.map((attempt, i) => ({
+          kind: 'block',
+          label: `Blockade ${i + 1} von ${blockedAttempts.length}`,
+          cells: [attempt.attemptedCell],
+          unitIds: [attempt.unitId],
+          run: () => animateBlockedAttempt(attempt),
+          gap: 0
+        })),
+        ...combatEvents.map((event, i) => ({
+          kind: 'combat',
+          label: `Kampf ${i + 1} von ${combatEvents.length}`,
+          cells: event.cells,
+          unitIds: event.participants.map(p => p.unitId),
+          run: () => animateCombatEvent(event, tickWinners),
+          gap: COMBAT_GAP_DURATION
+        }))
+      ];
+      if (hasConflict) {
+        showPendingCues(actions);
+        await wait(TICK_PAUSE_HOLD); // Takt pausiert - Konflikte werden sichtbar
       }
-      for (const event of combatEvents) {
-        await animateCombatEvent(event);
-        await wait(COMBAT_GAP_DURATION);
+      for (let i = 0; i < actions.length; i++) {
+        const action = actions[i];
+        tickDisplay.textContent = `${tickLabel} · ${action.label}`;
+        showPendingCues(actions.slice(i + 1));
+        const cleanup = await announceAction(action);
+        await action.run();
+        cleanup();
+        if (action.gap) await wait(action.gap);
       }
+      tickDisplay.textContent = tickLabel;
 
       // Phase 3: die verbleibenden, nicht behandelten Bewegungen (inkl.
       // siegreicher Kampf-Gewinner) vom Viertel-Schritt aus zu Ende fuehren.

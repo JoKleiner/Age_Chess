@@ -115,7 +115,7 @@ body {
   transition: transform 0.7s linear;
   /* laeuft genau einmal beim Erscheinen - kurzer heller Aufblitz, damit der
      Abschuss deutlich auffaellt */
-  animation: arrow-spawn 550ms ease-out;
+  animation: arrow-spawn 900ms ease-out;
 }
 @keyframes arrow-spawn {
   0% {
@@ -142,7 +142,7 @@ body {
   fill: none;
   stroke: #ffe14d;
   pointer-events: none;
-  animation: arrow-burst 480ms ease-out forwards;
+  animation: arrow-burst 850ms ease-out forwards;
 }
 @keyframes arrow-burst {
   0%   { opacity: 0.95; r: 2;  stroke-width: 3.5; }
@@ -232,7 +232,80 @@ body {
   stroke: #111;
   stroke-width: 0.5;
 }
+.hp-bar-segment {
+  transition: fill 0.35s ease, opacity 0.35s ease;
+}
 .hp-bar-segment.hp-bar-dead { fill: #333; opacity: 0.5; }
+/* Segment, das gerade verloren geht: kurz hell-rot aufleuchten, bevor es
+   (weich, per transition) in den "tot"-Zustand uebergeht. */
+.hp-bar-segment.hp-bar-dying { fill: #ff3b30; opacity: 1; transition: none; }
+.hp-bar.hp-bar-hit .hp-bar-frame {
+  animation: hp-frame-hit 1.2s ease-out;
+}
+@keyframes hp-frame-hit {
+  0%   { fill: #ff3b30; fill-opacity: 0.8; }
+  100% { fill: #000;    fill-opacity: 0.35; }
+}
+
+/* Aufsteigende "−N" (verlorene Einzel-Einheiten) ueber dem HP-Balken */
+.damage-label {
+  fill: #e0201a;
+  stroke: #fff;
+  stroke-width: 2.5;
+  paint-order: stroke;
+  font-size: 14px;
+  font-weight: bold;
+  text-anchor: middle;
+  pointer-events: none;
+  animation: damage-rise 1.4s ease-out forwards;
+}
+@keyframes damage-rise {
+  0%   { transform: translateY(4px);   opacity: 0; }
+  15%  { transform: translateY(0);     opacity: 1; }
+  70%  { transform: translateY(-10px); opacity: 1; }
+  100% { transform: translateY(-16px); opacity: 0; }
+}
+
+/* Getroffene Einheit blitzt kurz rot auf */
+.unit.unit-hit {
+  animation: unit-hit 0.6s ease-out;
+}
+@keyframes unit-hit {
+  0%   { filter: drop-shadow(0 0 0 #ff2a1a); }
+  25%  { filter: drop-shadow(0 0 6px #ff2a1a) brightness(1.4); }
+  100% { filter: drop-shadow(0 0 0 #ff2a1a); }
+}
+
+/* ---------- Vorankuendigung von Kaempfen / Blockaden ---------- */
+
+.cell-cue {
+  fill: none;
+  pointer-events: none;
+  stroke-linejoin: round;
+}
+/* Konfliktfeld, das in diesem Takt noch abgehandelt wird */
+.cell-cue-pending {
+  stroke: #8a1f1f;
+  stroke-width: 2.5;
+  stroke-dasharray: 5 4;
+  opacity: 0.75;
+}
+/* Das Feld der als naechstes abgehandelten Aktion: kraeftig pulsierend */
+.cell-cue-next-combat,
+.cell-cue-next-block {
+  stroke-width: 4;
+  animation: cue-pulse 0.5s ease-in-out infinite alternate;
+}
+.cell-cue-next-combat { stroke: #d01c1c; fill: rgba(224, 90, 90, 0.35); }
+.cell-cue-next-block  { stroke: #c79400; fill: rgba(255, 204, 0, 0.35); }
+@keyframes cue-pulse {
+  from { stroke-opacity: 0.45; stroke-width: 2.5; }
+  to   { stroke-opacity: 1;    stroke-width: 5.5; }
+}
+/* Beteiligte Einheiten der naechsten Aktion */
+.unit.unit-cue {
+  filter: drop-shadow(0 0 3px #fff) drop-shadow(0 0 5px #ff5a1f);
+}
 
 .ghost-blue { fill: #aac2f2; stroke: #3366cc; stroke-width: 2; pointer-events: none; }
 .ghost-red  { fill: #f2aaaa; stroke: #cc3333; stroke-width: 2; pointer-events: none; }
@@ -990,4 +1063,28 @@ body {
   .stack-count {
     font-size: clamp(9px, 2.4vw, 11px);
   }
+}
+
+/* Hinweis-Schild: geplante Aktion entfaellt (z.B. Schuss nach einem Kampf) */
+.skip-notice {
+  pointer-events: none;
+  animation: skip-notice-in 0.25s ease-out;
+}
+.skip-notice rect {
+  fill: #fff4d6;
+  stroke: #b36b00;
+  stroke-width: 1.2;
+}
+.skip-notice text {
+  fill: #6b3d00;
+  font-size: 10px;
+  font-weight: bold;
+  text-anchor: middle;
+}
+@keyframes skip-notice-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.unit.unit-skipped {
+  filter: grayscale(0.8) drop-shadow(0 0 4px #b36b00);
 }
