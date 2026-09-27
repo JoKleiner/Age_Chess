@@ -520,6 +520,15 @@ function resolveRound(room, combinedPlan) {
 
   const livingOf = (id) => UnitTypes.livingUnitsFor(unitsById[id].typeKey, hp[id]);
   const areEnemies = (a, b) => unitsById[a].role !== unitsById[b].role;
+  // Zieht diesen Takt noch ein handlungsfaehiger Gegner von `id` auf dasselbe
+  // Zielfeld? Dann wird `id` dort abgefangen (Kampf um das Feld) und trifft
+  // nicht stattdessen die Figur, die das Feld gerade verlaesst, in den Ruecken.
+  // Sonst haengt das Ergebnis davon ab, welcher Kampf zuerst aufgeloest wird.
+  const contestedAtDest = (id) => room.units.some(u =>
+    u.id !== id && !deadUnits.has(u.id) && areEnemies(u.id, id) && desired[u.id] &&
+    !combatResolvedThisTick.has(u.id) && !blockedUnits.has(u.id) &&
+    !samePos(desired[u.id], livePositions[u.id]) && samePos(desired[u.id], desired[id])
+  );
 
   // Nach einem Kampf verfallen fuer alle Beteiligten die restlichen Zuege
   // dieser Runde (blockedUnits) und sie werden diesen Takt nicht noch einmal
@@ -591,7 +600,8 @@ function resolveRound(room, combinedPlan) {
         const hitters = room.units.map(u => u.id).filter(id =>
           !deadUnits.has(id) && desired[id] && areEnemies(id, uid) &&
           !combatResolvedThisTick.has(id) && !blockedUnits.has(id) &&
-          !samePos(desired[id], livePositions[id]) && samePos(desired[id], origin)
+          !samePos(desired[id], livePositions[id]) && samePos(desired[id], origin) &&
+          !contestedAtDest(id)
         );
         if (!hitters.length) return;
 
@@ -1224,6 +1234,12 @@ function resolveRound(room, combinedPlan) {
       pendingIntercepts = [];
     }
 
+    // Versuchte Zielfelder dieses Takts VOR jeder Blockade/Kampf-Aufloesung -
+    // bleibt eine Einheit nach einem Kampf stehen, schaut sie trotzdem in die
+    // Richtung, in die sie angegriffen hat.
+    const attemptedCells = {};
+    Object.keys(desired).forEach(id => { attemptedCells[id] = { ...desired[id] }; });
+
     // In der Reihenfolge entdeckte Blockaden/Kaempfe dieses Takts, fuer die
     // "nacheinander" ablaufende Konflikt-Animation auf dem Client.
     const blockedAttempts = [];
@@ -1353,7 +1369,8 @@ function resolveRound(room, combinedPlan) {
         return aliveIds.filter(id =>
           id !== unitId && !exclude.has(id) && areEnemies(id, unitId) &&
           !combatResolvedThisTick.has(id) && !blockedUnits.has(id) &&
-          !isStationary(id) && posKeyOf(desired[id]) === originKey
+          !isStationary(id) && posKeyOf(desired[id]) === originKey &&
+          !contestedAtDest(id)
         );
       };
 
@@ -1481,6 +1498,11 @@ function resolveRound(room, combinedPlan) {
         if (prev && next && !samePos(prev, next)) {
           // Gelaufen: Blickrichtung = gelaufene Richtung.
           const d = HexBoard.dirBetween(prev, next);
+          if (d >= 0) liveFacing[unitId] = d;
+        } else if (combatResolvedThisTick.has(unitId)) {
+          // Gekaempft und stehen geblieben: Blickrichtung = Angriffsrichtung.
+          const attempt = attemptedCells[unitId];
+          const d = prev && attempt && !samePos(prev, attempt) ? HexBoard.dirBetween(prev, attempt) : -1;
           if (d >= 0) liveFacing[unitId] = d;
         } else if (!blockedUnits.has(unitId)) {
           // Stehen geblieben: falls dieser Takt ein Dreh-Schritt geplant war

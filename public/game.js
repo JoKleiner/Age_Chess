@@ -3495,7 +3495,8 @@ async function animateRound(ticks) {
     // bzw. ganzen Bewegung SOFORT (ohne Transition) auf die Bewegungsrichtung
     // "teleportieren" - danach gleiten Chip UND Dreieck synchron. Gelingt der
     // Schritt nicht, setzt das Takt-Ende die Blickrichtung wieder auf den
-    // Server-Stand (tickFacings). Reine Dreh-Schritte ohne Feldwechsel bleiben
+    // Server-Stand (tickFacings) - nach einem Kampf ist das die Angriffs-
+    // richtung, nach einer Blockade die alte Richtung. Reine Dreh-Schritte ohne Feldwechsel bleiben
     // ausgenommen (siehe oben).
     let snappedAny = false;
     attemptingIds.forEach(unitId => {
