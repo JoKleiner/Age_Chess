@@ -493,6 +493,36 @@ body {
   cursor: pointer;
 }
 
+/* ---------- Verbindungs-Hinweis (eigene Verbindung weg / Gegner kurz weg) ---------- */
+.connection-banner {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 58;
+  max-width: calc(100vw - 32px);
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: #b45309;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+
+/* ---------- Hinweis-Popup (z.B. ungueltiger Zug) ---------- */
+.notice-overlay {
+  z-index: 60;
+}
+.notice-text {
+  font-size: 14px;
+  color: #444;
+  margin: 0 0 14px;
+  max-width: 360px;
+}
+
 /* ---------- Spielanleitung: i-Button ---------- */
 .info-button {
   flex: 0 0 auto;

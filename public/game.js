@@ -8,7 +8,39 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
 
-const socket = io();
+// ---------- Sitzung (Wiederverbinden nach kurzem Verbindungsabbruch) ----------
+// Pro Browser-Tab (sessionStorage): so bleiben zwei Tabs am selben Geraet zwei
+// getrennte Spieler, und ein vom Handy neu geladener Tab findet sein Spiel wieder.
+const SESSION_KEY = 'ageChessSession';
+function loadSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    const s = raw ? JSON.parse(raw) : null;
+    return s && typeof s.roomId === 'string' && typeof s.token === 'string' ? s : null;
+  } catch (e) {
+    return null;
+  }
+}
+function saveSession(s) {
+  try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) { /* egal */ }
+}
+function clearSession() {
+  mySession = null;
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) { /* egal */ }
+}
+let mySession = loadSession();
+let localRound = null;      // Rundennummer des aktuell angezeigten Stands
+
+// Bei jedem (Wieder-)Verbindungsaufbau schickt der Client Raum + Token mit -
+// der Server haengt ihn dann sofort wieder an seinen reservierten Platz.
+const socket = io({
+  auth: (cb) => cb(mySession ? {
+    roomId: mySession.roomId,
+    token: mySession.token,
+    knownRound: localRound,
+    knownTurn: currentTurn
+  } : {})
+});
 
 const svg = document.getElementById('board');
 const statusEl = document.getElementById('status');
@@ -46,6 +78,11 @@ const interceptButton = document.getElementById('interceptButton');
 const moveOrSelectOverlay = document.getElementById('moveOrSelectOverlay');
 const choiceMoveButton = document.getElementById('choiceMoveButton');
 const choiceSelectButton = document.getElementById('choiceSelectButton');
+const noticeOverlay = document.getElementById('noticeOverlay');
+const noticeTitle = document.getElementById('noticeTitle');
+const noticeText = document.getElementById('noticeText');
+const noticeOkButton = document.getElementById('noticeOkButton');
+const connectionBanner = document.getElementById('connectionBanner');
 const confirmButton = document.getElementById('confirmButton');
 const editButton = document.getElementById('editButton');
 const tickDisplay = document.getElementById('tickDisplay');
@@ -79,6 +116,10 @@ let hp = {};                 // unitId -> aktuelle Bataillons-HP, für ALLE Einh
 let myPlans = {};           // unitId -> geplante Schritte, nur für EIGENE (lebende) Einheiten
 let selectedUnitId = null;  // welche eigene Einheit wird gerade geplant
 let confirmed = false;
+// true, solange die Zuege einer Phase ablaufen (executeRound bis Ende der
+// Animation) - in dieser Zeit ist jede Auswahl/Planung gesperrt.
+let roundAnimating = false;
+let currentTurn = null;     // Nummer der aktuellen Zugplanungs-Phase (vom Server)
 let shotTargeting = null;   // 'far' | 'near' | null - Feld-/Richtungswahl fuer einen Schuss laeuft gerade
 let turnTargeting = false;  // true = Reiter waehlt gerade eine neue Blickrichtung (Dreh-Schritt)
 let interceptTargeting = false; // true = Schwert/Speerkaempfer waehlt gerade eine gegnerische Einheit zum Abfangen
@@ -351,7 +392,10 @@ function setMatchState(match) {
   if (!match) return;
   if (match.scores) matchScores = match.scores;
   if (match.names) matchNames = match.names;
-  if (match.round != null) scoreRound.textContent = `Runde ${match.round}`;
+  if (match.round != null) {
+    localRound = match.round;
+    scoreRound.textContent = `Runde ${match.round}`;
+  }
   renderScoreBar();
 }
 
@@ -881,24 +925,32 @@ function buildManual() {
   c.appendChild(multiBox);
 }
 
-socket.on('joined', ({ role, unitTypes, maxUnitsPerPlayer: maxUnits, match }) => {
+socket.on('joined', ({ role, sessionToken, unitTypes, maxUnitsPerPlayer: maxUnits, match }) => {
   myRole = role;
   myUnitTypes = unitTypes || UnitTypes.TYPES;
   maxUnitsPerPlayer = maxUnits || UnitTypes.MAX_UNITS_PER_PLAYER;
   phase = 'placement';
   placedByType = {};
+  if (sessionToken) {
+    mySession = { roomId: myRoomId, token: sessionToken };
+    saveSession(mySession);
+  }
 
-  joinAreaEl.classList.add('hidden');
-  statusEl.classList.remove('hidden');
-  gameAreaEl.classList.remove('hidden');
+  showGameScreen();
   setupPanel.classList.remove('hidden');
   setMatchState(match || { scores: { blue: 0, red: 0 }, names: matchNames, round: 1 });
-  scoreBar.classList.remove('hidden');
   initBoard();
   highlightOwnZone();
   renderStackList();
   statusEl.textContent = `Du bist Spieler ${role === 'blue' ? 'Blau' : 'Rot'}. Wähle deine Einheiten aus und platziere sie auf deinem Bereich.`;
 });
+
+function showGameScreen() {
+  joinAreaEl.classList.add('hidden');
+  statusEl.classList.remove('hidden');
+  gameAreaEl.classList.remove('hidden');
+  scoreBar.classList.remove('hidden');
+}
 
 socket.on('roomFull', () => {
   statusEl.classList.remove('hidden');
@@ -932,8 +984,15 @@ socket.on('opponentPlacementReady', () => {
   }
 });
 
-socket.on('gameStart', ({ units, positions: serverPositions, hp: serverHp, facings: serverFacings }) => {
+socket.on('gameStart', (data) => startPlayingPhase(data));
+
+function startPlayingPhase({ units, positions: serverPositions, hp: serverHp, facings: serverFacings, turn }) {
   phase = 'playing';
+  currentTurn = turn;
+  roundAnimating = false;
+  confirmed = false;
+  myPlans = {};
+  selectedUnitId = null;
   unitsById = {};
   units.forEach(u => { unitsById[u.id] = u; });
   positions = serverPositions;
@@ -966,13 +1025,14 @@ socket.on('gameStart', ({ units, positions: serverPositions, hp: serverHp, facin
 
   const roleName = myRole === 'blue' ? 'Blau' : 'Rot';
   statusEl.textContent = `Spiel gestartet! Du bist ${roleName}. Klick auf eine deiner Einheiten, um Züge zu planen.`;
-});
+}
 
-socket.on('planRejected', ({ reason }) => {
+socket.on('planRejected', ({ reason, turn }) => {
+  if (typeof turn === 'number') currentTurn = turn;
+  // Waehrend eine Phase ablaeuft wird ohnehin am Ende alles zurueckgesetzt.
+  if (!roundAnimating) resetMyPlanning();
   statusEl.textContent = `Zug abgelehnt: ${reason}`;
-  confirmed = false;
-  confirmButton.disabled = false;
-  editButton.classList.add('hidden');
+  showNotice('Ungültiger Zug', `${reason} Deine Auswahl wurde zurückgesetzt – bitte plane deine Züge neu.`);
 });
 
 socket.on('opponentConfirmed', () => {
@@ -985,19 +1045,116 @@ socket.on('matchState', (match) => {
   setMatchState(match);
 });
 
-socket.on('executeRound', ({ ticks, roundResult, matchResult }) => {
-  closePlanning();
-  editButton.classList.add('hidden');
-  animateRound(ticks).then(async () => {
-    if (roundResult) setMatchState(roundResult); // Punktestand + Namen aktualisieren
-    if (matchResult) {
-      showVictory(matchResult);
-    } else if (roundResult) {
+socket.on('executeRound', (payload) => { runExecuteRound(payload); });
+
+async function runExecuteRound({ ticks, roundResult, matchResult, turn, finalState }) {
+  // 1. Ab jetzt ist bis zum Ende der Phase nichts mehr waehl-/klickbar.
+  lockPlanningForRound();
+  // Schon jetzt die neue Phasen-Nummer merken: bricht die Verbindung waehrend
+  // der Animation ab, meldet der Client sich damit korrekt zurueck (diese
+  // Ausfuehrung wird ihm dann nicht noch einmal nachgereicht).
+  if (typeof turn === 'number') currentTurn = turn;
+
+  try {
+    await animateRound(ticks);
+  } catch (err) {
+    console.error('Fehler in der Runden-Animation:', err);
+  }
+  cleanupRoundVisuals();
+
+  if (roundResult) setMatchState(roundResult); // Punktestand + Namen aktualisieren
+  if (matchResult) {
+    showVictory(matchResult); // bleibt gesperrt, Seite laedt gleich neu
+    return;
+  }
+  if (roundResult) {
+    try {
       await showRoundBanner(roundResult);
+    } finally {
+      roundAnimating = false;
       enterPlacementAgain(roundResult.round + 1);
     }
+    applyPendingResume();
+    return;
+  }
+
+  // 2. Phase abgelaufen: verbindlichen Serverstand uebernehmen und alle
+  //    Plan-/Tabelleneintraege hart zuruecksetzen.
+  try {
+    if (finalState) syncToFinalState(finalState);
+  } catch (err) {
+    console.error('Fehler beim Abgleich mit dem Serverstand:', err);
+  }
+  if (typeof turn === 'number') currentTurn = turn;
+  roundAnimating = false;
+  resetMyPlanning();
+  // 3. Erst jetzt duerfen wieder Felder/Einheiten gewaehlt werden.
+  statusEl.textContent = 'Neue Runde - klick auf eine deiner Einheiten, um Züge zu planen.';
+  applyPendingResume();
+}
+
+// Sperrt jede Planung, solange die Zuege einer Phase ablaufen.
+function lockPlanningForRound() {
+  roundAnimating = true;
+  confirmed = true; // alle bestehenden "confirmed"-Sperren greifen mit
+  closeMoveOrSelectPrompt();
+  closePlanning();
+  confirmButton.disabled = true;
+  editButton.classList.add('hidden');
+}
+
+// Setzt ALLE eigenen Plaene, die Auswahl, Ziel-Modi und die Takt-Tabelle
+// zurueck und gibt die Planung wieder frei (confirmed = false).
+function resetMyPlanning() {
+  myPlans = {};
+  Object.values(unitsById).filter(u => u.role === myRole).forEach(u => {
+    myPlans[u.id] = [];
   });
-});
+  confirmed = false;
+  closeMoveOrSelectPrompt();
+  closePlanning(); // selectedUnitId, Ziel-Modi, Tabelle, Highlights, Pfad
+  confirmButton.disabled = false;
+  editButton.classList.add('hidden');
+}
+
+// Raeumt Reste der Animation weg (auch wenn sie mit einem Fehler abbrach).
+function cleanupRoundVisuals() {
+  tickDisplay.classList.remove('tick-visible');
+  clearArrows();
+  cueLayer.innerHTML = '';
+  Object.values(hexElements).forEach(el => el.classList.remove('blocked-cell'));
+}
+
+// Gleicht Positionen/HP/Blickrichtungen mit dem Endstand des Servers ab -
+// falls die Animation etwas verpasst hat, stimmt das Brett danach trotzdem.
+function syncToFinalState({ positions: finalPositions, hp: finalHp, facings: finalFacings }) {
+  Object.keys(unitsById).forEach(unitId => {
+    const h = finalHp ? finalHp[unitId] : undefined;
+    if (h != null && h <= 0) {
+      removeDefeatedUnit(unitId);
+      return;
+    }
+    if (h != null && hp[unitId] !== h) {
+      hp[unitId] = h;
+      updateHpBar(unitId);
+    }
+    const p = finalPositions && finalPositions[unitId];
+    if (p && !samePos(p, positions[unitId])) {
+      positions[unitId] = { q: p.q, r: p.r };
+      renderUnit(unitId);
+    }
+    if (finalFacings && finalFacings[unitId] != null) facings[unitId] = finalFacings[unitId];
+  });
+  refreshFacingMarkers();
+}
+
+function showNotice(title, text) {
+  noticeTitle.textContent = title;
+  noticeText.textContent = text;
+  noticeOverlay.classList.remove('hidden');
+}
+
+noticeOkButton.addEventListener('click', () => noticeOverlay.classList.add('hidden'));
 
 socket.on('returnToStart', () => {
   // Sauberster Weg zurueck auf den Startbildschirm.
@@ -1029,6 +1186,7 @@ function showRoundBanner(roundResult) {
 // wann die Runden-Animation beim Client tatsaechlich fertig ist, und koennte
 // sonst mitten in der Animation oder noch vor der Anzeige neu laden lassen).
 function showEndOverlay(title, name) {
+  clearSession(); // Spiel ist vorbei - nach dem Neuladen nicht wieder beitreten
   victoryTitle.textContent = title;
   victoryName.textContent = name;
   victoryOverlay.classList.remove('hidden');
@@ -1051,11 +1209,27 @@ function showVictory({ winner, winnerName }) {
 // Zuruecksetzen fuer die naechste Runde (Scores/Namen bleiben, alles andere
 // wird wie ein frischer Platzierungs-Start aufgebaut).
 function enterPlacementAgain(nextRound) {
+  teardownBoard();
   phase = 'placement';
+  if (nextRound != null) {
+    localRound = nextRound;
+    scoreRound.textContent = `Runde ${nextRound}`;
+  }
+  showPlacementUI();
+  statusEl.textContent = `Runde ${nextRound}. Wähle deine Einheiten und platziere sie.`;
+}
+
+// Entfernt alles Spielphasen-/Platzierungs-Spezifische vom Brett und setzt
+// den lokalen Zustand zurueck (Scores/Namen bleiben).
+function teardownBoard() {
+  phase = null;
   placedByType = {};
+  armedTypeKey = null;
   placementReady = false;
   selectedUnitId = null;
   confirmed = false;
+  roundAnimating = false;
+  currentTurn = null;
   shotTargeting = null;
   turnTargeting = false;
   interceptTargeting = false;
@@ -1078,6 +1252,7 @@ function enterPlacementAgain(nextRound) {
   arrowLayer.innerHTML = '';
   facingLayer.innerHTML = '';
   placementFacingLayer.innerHTML = '';
+  Object.keys(activeArrows).forEach(id => delete activeArrows[id]);
 
   planPanel.classList.add('hidden');
   planPanel.classList.remove('plan-panel-invisible');
@@ -1085,17 +1260,215 @@ function enterPlacementAgain(nextRound) {
   editButton.classList.add('hidden');
   confirmButton.disabled = false;
   tickDisplay.classList.remove('tick-visible');
+}
+
+// Baut die Platzierungs-Oberflaeche (leer) auf.
+function showPlacementUI() {
   placementReadyButton.disabled = false;
   placementReadyButton.classList.remove('hidden');
   placementEditButton.classList.add('hidden');
   setupPanel.classList.remove('hidden');
 
-  if (nextRound != null) scoreRound.textContent = `Runde ${nextRound}`;
-
   initBoard();
   highlightOwnZone();
   renderStackList();
-  statusEl.textContent = `Runde ${nextRound}. Wähle deine Einheiten und platziere sie.`;
+}
+
+// ---------- Wiederverbinden ----------
+
+let selfDisconnected = false; // eigene Verbindung gerade weg
+let opponentAway = false;     // Gegenspieler gerade getrennt (Platz reserviert)
+let pendingResume = null;     // Stand vom Server, der nach der laufenden Animation angewendet wird
+
+function updateConnectionBanner() {
+  if (selfDisconnected) {
+    connectionBanner.textContent = 'Verbindung unterbrochen – verbinde neu …';
+  } else if (opponentAway) {
+    connectionBanner.textContent = 'Gegenspieler ist kurz weg – warte auf seine Rückkehr …';
+  } else {
+    connectionBanner.classList.add('hidden');
+    return;
+  }
+  connectionBanner.classList.remove('hidden');
+}
+
+socket.on('connect', () => {
+  selfDisconnected = false;
+  updateConnectionBanner();
+  // socket.io hat den Socket wiederhergestellt (verpasste Nachrichten kommen
+  // gleich nach) - eigenen Stand trotzdem noch einmal melden, falls etwas
+  // kurz vor dem Abbruch verloren ging.
+  if (socket.recovered && myRole) resyncMyState();
+});
+
+socket.on('disconnect', () => {
+  // Waehrend der Trennung gepufferte Nachrichten verwerfen - nach dem
+  // Wiederverbinden meldet der Client seinen Stand ohnehin komplett neu.
+  if (Array.isArray(socket.sendBuffer)) socket.sendBuffer.length = 0;
+  if (!myRole) return;
+  selfDisconnected = true;
+  updateConnectionBanner();
+});
+
+// Handy: beim Zurueckwechseln in den Tab sofort neu verbinden statt auf den
+// naechsten Wiederverbindungs-Versuch zu warten.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !socket.connected && mySession) socket.connect();
+});
+
+socket.on('opponentDisconnected', () => {
+  opponentAway = true;
+  updateConnectionBanner();
+});
+
+socket.on('opponentReconnected', () => {
+  opponentAway = false;
+  updateConnectionBanner();
+});
+
+socket.on('resumeFailed', () => {
+  const wasInGame = !!myRole;
+  clearSession();
+  if (wasInGame) showEndOverlay('Verbindung verloren', 'Das Spiel konnte nicht fortgesetzt werden');
+});
+
+socket.on('resumeState', (data) => {
+  selfDisconnected = false;
+  opponentAway = !!data.opponentJoined && !data.opponentConnected;
+  updateConnectionBanner();
+  if (roundAnimating) {
+    pendingResume = data; // erst nach der laufenden Animation anwenden
+    return;
+  }
+  applyResume(data);
+});
+
+function applyPendingResume() {
+  if (!pendingResume) return;
+  const data = pendingResume;
+  pendingResume = null;
+  applyResume(data);
+}
+
+function applyResume(data) {
+  if (!mySession) return;
+  myRoomId = mySession.roomId;
+  if (data.sessionToken && data.sessionToken !== mySession.token) {
+    mySession.token = data.sessionToken;
+    saveSession(mySession);
+  }
+
+  // Verpasste Ausfuehrung (lokaler Stand ist genau davor) - nachspielen.
+  if (data.missedRound && myRole === data.role && phase === 'playing' &&
+      currentTurn != null && data.missedRound.turn === currentTurn + 1) {
+    runExecuteRound(data.missedRound).then(() => reportResumeStatus(data));
+    return;
+  }
+
+  if (data.matchResult) {
+    if (myRole !== data.role) {
+      myRole = data.role;
+      showGameScreen();
+    }
+    setMatchState(data.match);
+    showVictory(data.matchResult);
+    return;
+  }
+
+  const intact = myRole === data.role && phase === data.phase && localRound === data.match.round &&
+    (data.phase === 'placement' || currentTurn === data.turn);
+  if (intact) {
+    // Lokaler Stand ist aktuell - nur den eigenen Stand erneut melden.
+    setMatchState(data.match);
+    resyncMyState();
+  } else {
+    rebuildFromResume(data);
+  }
+  reportResumeStatus(data);
+}
+
+// Kompletter Neuaufbau aus dem Server-Stand (z.B. nach Neuladen des Tabs).
+function rebuildFromResume(data) {
+  teardownBoard();
+  closePlanning();
+  noticeOverlay.classList.add('hidden');
+  myRole = data.role;
+  myUnitTypes = data.unitTypes || UnitTypes.TYPES;
+  maxUnitsPerPlayer = data.maxUnitsPerPlayer || UnitTypes.MAX_UNITS_PER_PLAYER;
+  showGameScreen();
+  setMatchState(data.match);
+
+  if (data.phase === 'placement') {
+    phase = 'placement';
+    showPlacementUI();
+    (data.placements || []).forEach(p => {
+      const chipIndex = Number(String(p.unitId).split('_').pop());
+      const list = placedByType[p.typeKey] || (placedByType[p.typeKey] = []);
+      const entry = { unitId: p.unitId, q: p.q, r: p.r };
+      if (p.facing != null) entry.facing = p.facing;
+      list.push(entry);
+      createPlacementChip(p.unitId, p.typeKey, chipIndex, p.q, p.r, p.facing);
+    });
+    placementReady = !!data.ready;
+    if (placementReady) {
+      placementReadyButton.disabled = true;
+      placementEditButton.classList.remove('hidden');
+      clearHighlights();
+    } else {
+      highlightOwnZone();
+    }
+    renderStackList();
+    return;
+  }
+
+  initBoard();
+  startPlayingPhase(data);
+  if (data.myPlan) {
+    Object.keys(myPlans).forEach(id => {
+      if (Array.isArray(data.myPlan[id])) myPlans[id] = data.myPlan[id];
+    });
+    confirmed = true;
+    confirmButton.disabled = true;
+    editButton.classList.remove('hidden');
+  }
+}
+
+// Meldet den eigenen Stand erneut an den Server (idempotent) - deckt
+// Nachrichten ab, die kurz vor/waehrend eines Abbruchs verloren gingen.
+function resyncMyState() {
+  if (!myRoomId || !myRole) return;
+  if (phase === 'placement') {
+    const placements = [];
+    Object.entries(placedByType).forEach(([typeKey, list]) => {
+      list.forEach(p => placements.push({ typeKey, q: p.q, r: p.r, facing: p.facing }));
+    });
+    socket.emit('syncPlacement', { roomId: myRoomId, placements, ready: placementReady });
+  } else if (phase === 'playing' && !roundAnimating && currentTurn != null) {
+    if (confirmed) {
+      socket.emit('submitPlan', { roomId: myRoomId, plan: myPlans, turn: currentTurn, resync: true });
+    } else {
+      socket.emit('cancelPlan', { roomId: myRoomId, turn: currentTurn });
+    }
+  }
+}
+
+function reportResumeStatus(data) {
+  if (!victoryOverlay.classList.contains('hidden')) return;
+  if (!data.opponentJoined) {
+    statusEl.textContent = 'Wieder verbunden. Warte auf Gegenspieler …';
+  } else if (phase === 'placement') {
+    statusEl.textContent = placementReady
+      ? 'Wieder verbunden. Platzierung bestätigt – warte auf Gegenspieler …'
+      : (data.opponentReady
+        ? 'Wieder verbunden. Gegenspieler ist mit der Platzierung fertig. Du bist noch dran.'
+        : 'Wieder verbunden. Wähle deine Einheiten und platziere sie.');
+  } else if (phase === 'playing') {
+    statusEl.textContent = confirmed
+      ? 'Wieder verbunden. Züge bestätigt – warte auf Gegenspieler …'
+      : (data.opponentConfirmed
+        ? 'Wieder verbunden. Gegenspieler hat bereits bestätigt. Du bist noch dran.'
+        : 'Wieder verbunden. Klick auf eine deiner Einheiten, um Züge zu planen.');
+  }
 }
 
 // ---------- Platzierungsphase ----------
@@ -1378,6 +1751,7 @@ function createUnitChip(unit) {
   const el = createChipElement(unit.role, unit.typeKey, unit.chipIndex);
   el.addEventListener('click', (event) => {
     event.stopPropagation();
+    if (roundAnimating) return; // Zuege laufen gerade ab - nichts waehlbar
     if (interceptTargeting && unit.role !== myRole) {
       handleInterceptTargetClick(unit.id);
       return;
@@ -1610,6 +1984,7 @@ function removeDefeatedUnit(unitId) {
 // ---------- Planung (pro ausgewählter eigener Einheit) ----------
 
 function selectUnit(unitId) {
+  if (roundAnimating || !unitsById[unitId]) return;
   selectedUnitId = unitId;
   shotTargeting = null;
   turnTargeting = false;
@@ -2199,7 +2574,7 @@ function handleBoardClick(q, r) {
     return;
   }
 
-  if (!selectedUnitId || confirmed) return;
+  if (roundAnimating || !selectedUnitId || confirmed) return;
 
   if (shotTargeting) {
     handleShotTargetClick(q, r);
@@ -2233,6 +2608,7 @@ function closeMoveOrSelectPrompt() {
 
 choiceMoveButton.addEventListener('click', () => {
   if (!pendingFieldAction) return;
+  if (roundAnimating) { closeMoveOrSelectPrompt(); return; }
   const { action, q, r } = pendingFieldAction;
   closeMoveOrSelectPrompt();
   if (action === 'turn') {
@@ -2244,6 +2620,7 @@ choiceMoveButton.addEventListener('click', () => {
 
 choiceSelectButton.addEventListener('click', () => {
   if (!pendingFieldAction) return;
+  if (roundAnimating) { closeMoveOrSelectPrompt(); return; }
   const { unitId } = pendingFieldAction;
   closeMoveOrSelectPrompt();
   selectUnit(unitId);
@@ -2259,7 +2636,7 @@ turnButton.addEventListener('click', () => enterTurnTargeting());
 interceptButton.addEventListener('click', () => enterInterceptTargeting());
 
 confirmButton.addEventListener('click', () => {
-  if (confirmed || !myRoomId || !myRole) return;
+  if (roundAnimating || confirmed || !myRoomId || !myRole || currentTurn == null) return;
   confirmed = true;
   confirmButton.disabled = true;
   editButton.classList.remove('hidden');
@@ -2270,16 +2647,16 @@ confirmButton.addEventListener('click', () => {
   clearHighlights();
   refreshShotUI();
   statusEl.textContent = 'Züge bestätigt. Warte auf Gegenspieler...';
-  socket.emit('submitPlan', { roomId: myRoomId, plan: myPlans });
+  socket.emit('submitPlan', { roomId: myRoomId, plan: myPlans, turn: currentTurn });
 });
 
 editButton.addEventListener('click', () => {
-  if (!confirmed || !myRoomId) return;
+  if (roundAnimating || !confirmed || !myRoomId) return;
   confirmed = false;
   confirmButton.disabled = false;
   editButton.classList.add('hidden');
   statusEl.textContent = 'Zug wird wieder bearbeitet.';
-  socket.emit('cancelPlan', { roomId: myRoomId });
+  socket.emit('cancelPlan', { roomId: myRoomId, turn: currentTurn });
   renderPlanTable();
   highlightNextOptions();
 });
@@ -2902,16 +3279,7 @@ async function animateRound(ticks) {
     await wait(TICK_PAUSE_AFTER);
   }
 
-  tickDisplay.classList.remove('tick-visible');
-  clearArrows();
-  Object.values(unitsById).filter(u => u.role === myRole).forEach(u => {
-    myPlans[u.id] = [];
-  });
-  confirmed = false;
-  shotTargeting = null;
-  turnTargeting = false;
-  interceptTargeting = false;
-  setInterceptTargetsHighlight(false);
-  confirmButton.disabled = false;
-  statusEl.textContent = 'Neue Runde - klick auf eine deiner Einheiten, um Züge zu planen.';
+  // Aufraeumen + Zuruecksetzen der Planung passiert im executeRound-Handler
+  // (cleanupRoundVisuals / resetMyPlanning), damit es auch bei einem Fehler
+  // in der Animation sicher greift.
 }

@@ -1,13 +1,25 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const HexBoard = require('./public/board/hexBoard.js');
 const UnitTypes = require('./public/pieces/unitTypes.js');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+// Wie lange ein Spieler nach einem Verbindungsabbruch (z.B. Handy kurz in eine
+// andere App gewechselt, Bildschirm aus) zurueckkommen darf, bevor er als
+// "hat den Raum verlassen" gilt. So lange bleibt sein Platz reserviert.
+const RECONNECT_GRACE_MS = Number(process.env.RECONNECT_GRACE_MS) || 90 * 1000;
+const io = new Server(server, {
+  // Kurze Abbrueche: socket.io stellt Socket (id, data, Raeume) wieder her und
+  // liefert die in der Zwischenzeit verpassten Nachrichten nach.
+  connectionStateRecovery: {
+    maxDisconnectionDuration: RECONNECT_GRACE_MS,
+    skipMiddlewares: true
+  }
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -67,8 +79,12 @@ function canonicalShot(rawShot, launchPos, launchTick0, typeKey) {
 }
 
 const rooms = {};
+let roomChannelCounter = 0;
 // rooms[roomId] = {
-//   sockets: { blue: socketId, red: socketId },
+//   sockets: { blue: socketId, red: socketId },   <- nur aktuell VERBUNDENE Sockets
+//   tokens: { blue: token, red: token },          <- Sitzungs-Token: Platz bleibt reserviert,
+//                                                    auch waehrend der Spieler kurz getrennt ist
+//   channel: eindeutiger socket.io-Raum dieser Raum-Instanz
 //   phase: 'placement' | 'playing',
 //   placements: { blue: [{unitId, typeKey, q, r}, ...], red: [...] }, <- Reihenfolge = Stapel-Reihenfolge
 //   ready: { blue: false, red: false },
@@ -80,8 +96,18 @@ const rooms = {};
 // }
 
 function createRoom() {
+  roomChannelCounter += 1;
   return {
     sockets: {},
+    tokens: { blue: null, red: null },
+    leaveTimers: { blue: null, red: null },
+    // Eigener socket.io-Raum pro Raum-Instanz: wird ein beendeter Raum mit
+    // gleichem Namen neu angelegt, erreichen alte Sockets ihn nicht mehr.
+    channel: `room#${roomChannelCounter}`,
+    // Letzte ausgefuehrte Phase - fuer einen Spieler, der sie waehrend eines
+    // Verbindungsabbruchs verpasst hat (wird ihm beim Wiederverbinden nachgereicht).
+    lastExecute: null,
+    matchResult: null,
     phase: 'placement',
     placements: { blue: [], red: [] },
     ready: { blue: false, red: false },
@@ -92,6 +118,11 @@ function createRoom() {
     // Blickrichtung (Reiter). Persistiert wie positions/hp ueber Runden.
     facings: null,
     plans: { blue: null, red: null },
+    // Laufende Nummer der Zugplanungs-Phase innerhalb einer Runde. Jeder
+    // eingereichte Plan / jedes Zurueckziehen traegt diese Nummer mit; passt
+    // sie nicht (z.B. ein verspaeteter Klick aus der schon aufgeloesten
+    // Phase), wird die Nachricht verworfen bzw. abgelehnt.
+    turn: 0,
     // Match ueber mehrere Runden (best of 3): wer 2 Runden gewinnt, gewinnt.
     scores: { blue: 0, red: 0 },
     names: { blue: '', red: '' }, // gewaehlter Name, leer = "Spieler Blau/Rot"
@@ -133,6 +164,7 @@ function resetRoomForNextRound(room) {
   room.hp = null;
   room.facings = null;
   room.plans = { blue: null, red: null };
+  room.turn = 0;
   room.round += 1;
 }
 
@@ -1338,35 +1370,158 @@ function buildUnitsAndPositions(room) {
   return { units, positions, hp, facings };
 }
 
+function otherRoleOf(role) {
+  return role === 'blue' ? 'red' : 'blue';
+}
+
+// Raum zu einer Client-Nachricht - nur, wenn dieser Socket dort wirklich der
+// aktuell verbundene Spieler seiner Rolle ist (alte/ersetzte Sockets nicht).
+function roomOf(socket, roomId) {
+  const room = rooms[roomId];
+  const role = socket.data.role;
+  if (!room || !role || socket.data.roomId !== roomId) return null;
+  if (room.sockets[role] !== socket.id) return null;
+  return room;
+}
+
+// Haengt einen (wieder)verbundenen Socket an seinen reservierten Platz.
+function attachSocket(socket, room, roomId, role) {
+  const oldId = room.sockets[role];
+  room.sockets[role] = socket.id;
+  socket.join(room.channel);
+  socket.data.roomId = roomId;
+  socket.data.role = role;
+  if (room.leaveTimers[role]) {
+    clearTimeout(room.leaveTimers[role]);
+    room.leaveTimers[role] = null;
+  }
+  // Alte, noch nicht als tot erkannte Verbindung desselben Spielers schliessen
+  // (ihr disconnect-Handler ignoriert sie, da sie schon ersetzt ist).
+  if (oldId && oldId !== socket.id) {
+    const old = io.sockets.sockets.get(oldId);
+    if (old) old.disconnect(true);
+  }
+  const otherId = room.sockets[otherRoleOf(role)];
+  if (otherId) io.to(otherId).emit('opponentReconnected');
+}
+
+// Vollstaendiger Stand fuer einen wiederverbundenen Spieler.
+function resumePayload(room, role, knownRound, knownTurn) {
+  const other = otherRoleOf(role);
+  const payload = {
+    role,
+    sessionToken: room.tokens[role],
+    unitTypes: UnitTypes.TYPES,
+    maxUnitsPerPlayer: UnitTypes.MAX_UNITS_PER_PLAYER,
+    match: matchStatePayload(room),
+    phase: room.phase,
+    opponentJoined: !!room.tokens[other],
+    opponentConnected: !!room.sockets[other],
+    matchResult: room.matchResult
+  };
+  if (room.phase === 'placement') {
+    payload.placements = room.placements[role].map(p => ({ ...p }));
+    payload.ready = room.ready[role];
+    payload.opponentReady = room.ready[other];
+  } else {
+    const alive = room.units.filter(u => room.hp[u.id] > 0);
+    payload.units = alive;
+    payload.positions = Object.fromEntries(alive.map(u => [u.id, room.positions[u.id]]));
+    payload.hp = Object.fromEntries(alive.map(u => [u.id, room.hp[u.id]]));
+    payload.facings = Object.fromEntries(alive.filter(u => room.facings && room.facings[u.id] != null)
+      .map(u => [u.id, room.facings[u.id]]));
+    payload.turn = room.turn;
+    payload.myPlan = room.plans[role];
+    payload.opponentConfirmed = !!room.plans[other];
+  }
+  // Hat der Client die letzte Ausfuehrung verpasst, bekommt er sie nachgereicht.
+  const le = room.lastExecute;
+  if (le && le.round === knownRound && le.turn === knownTurn) payload.missedRound = le.payload;
+  return payload;
+}
+
+// Schonfrist abgelaufen: Spieler gilt jetzt endgueltig als gegangen.
+function finalizeLeave(roomId, room, role) {
+  room.leaveTimers[role] = null;
+  if (room.sockets[role]) return; // doch zurueckgekommen
+  room.tokens[role] = null;
+  const other = otherRoleOf(role);
+  if (!room.tokens[other]) {
+    if (room.leaveTimers[other]) clearTimeout(room.leaveTimers[other]);
+    if (rooms[roomId] === room) delete rooms[roomId];
+    return;
+  }
+  // Match bereits (regulaer) zu Ende - keine zweite Meldung noetig.
+  if (room.closing) return;
+  room.closing = true;
+  // Verbleibender Spieler bekommt die Meldung wie beim Sieg-Overlay und laedt
+  // sich nach seinem eigenen 5s-Countdown selbst neu (siehe showEndOverlay).
+  io.to(room.channel).emit('playerLeft');
+}
+
 io.on('connection', (socket) => {
-  console.log('Spieler verbunden:', socket.id);
+  console.log('Spieler verbunden:', socket.id, socket.recovered ? '(wiederhergestellt)' : '');
+
+  // Wiederverbindung: entweder hat socket.io den Socket samt verpasster
+  // Nachrichten wiederhergestellt, oder der Client meldet sich mit seinem
+  // Sitzungs-Token (aus dem Handshake) zurueck und bekommt den ganzen Stand.
+  if (socket.recovered) {
+    const { roomId, role } = socket.data;
+    const room = roomId && rooms[roomId];
+    if (room && role && room.tokens[role] && !room.sockets[role]) {
+      attachSocket(socket, room, roomId, role);
+    } else if (!room || !role || !room.tokens[role]) {
+      socket.data.roomId = null;
+      socket.data.role = null;
+      socket.emit('resumeFailed');
+    }
+  } else {
+    const auth = socket.handshake.auth || {};
+    if (typeof auth.roomId === 'string' && typeof auth.token === 'string') {
+      const room = rooms[auth.roomId];
+      const role = room && ['blue', 'red'].find(r => room.tokens[r] === auth.token);
+      if (room && role) {
+        attachSocket(socket, room, auth.roomId, role);
+        socket.emit('resumeState', resumePayload(room, role, auth.knownRound, auth.knownTurn));
+        console.log(`Spieler ${socket.id} ist Raum ${auth.roomId} als ${role} wieder beigetreten`);
+      } else {
+        socket.emit('resumeFailed');
+      }
+    }
+  }
 
   socket.on('joinRoom', (payload) => {
     const roomId = typeof payload === 'string' ? payload : (payload && payload.roomId);
     const rawName = typeof payload === 'object' && payload ? payload.name : '';
-    if (!roomId) return;
+    if (!roomId || typeof roomId !== 'string') return;
+    if (socket.data.role) return; // schon in einem Raum
 
-    if (!rooms[roomId]) {
+    // Ein beendetes Match macht Platz fuer ein neues unter demselben Namen.
+    if (!rooms[roomId] || rooms[roomId].closing) {
       rooms[roomId] = createRoom();
     }
     const room = rooms[roomId];
 
+    // Freie Rolle = kein Sitzungs-Token (ein kurz getrennter Spieler behaelt
+    // seinen Platz waehrend der Schonfrist).
     let role = null;
-    if (!room.sockets.blue) role = 'blue';
-    else if (!room.sockets.red) role = 'red';
+    if (!room.tokens.blue) role = 'blue';
+    else if (!room.tokens.red) role = 'red';
     else {
       socket.emit('roomFull');
       return;
     }
 
+    room.tokens[role] = crypto.randomUUID();
     room.sockets[role] = socket.id;
     room.names[role] = sanitizeName(rawName);
-    socket.join(roomId);
+    socket.join(room.channel);
     socket.data.roomId = roomId;
     socket.data.role = role;
 
     socket.emit('joined', {
       role,
+      sessionToken: room.tokens[role],
       unitTypes: UnitTypes.TYPES,
       maxUnitsPerPlayer: UnitTypes.MAX_UNITS_PER_PLAYER,
       match: matchStatePayload(room)
@@ -1374,9 +1529,9 @@ io.on('connection', (socket) => {
 
     console.log(`Spieler ${socket.id} ist Raum ${roomId} als ${role} beigetreten`);
 
-    if (room.sockets.blue && room.sockets.red) {
-      io.to(roomId).emit('placementPhaseStart');
-      io.to(roomId).emit('matchState', matchStatePayload(room));
+    if (room.tokens.blue && room.tokens.red) {
+      io.to(room.channel).emit('placementPhaseStart');
+      io.to(room.channel).emit('matchState', matchStatePayload(room));
     }
   });
 
@@ -1384,7 +1539,7 @@ io.on('connection', (socket) => {
   // seiner eigenen Zone. Reihenfolge in room.placements[role] = Stapel-Reihenfolge,
   // die Instanznummer (chipIndex/label) ergibt sich daraus erst beim Spielstart.
   socket.on('placeUnit', ({ roomId, typeKey, q, r, facing }) => {
-    const room = rooms[roomId];
+    const room = roomOf(socket, roomId);
     if (!room) return;
     const role = socket.data.role;
     if (!role) return;
@@ -1405,7 +1560,7 @@ io.on('connection', (socket) => {
   // Blickrichtung einer bereits platzierten Einheit aendern (nur solange die
   // Platzierungsphase laeuft und der Spieler noch nicht bereit ist).
   socket.on('setPlacementFacing', ({ roomId, unitId, facing }) => {
-    const room = rooms[roomId];
+    const room = roomOf(socket, roomId);
     if (!room) return;
     const role = socket.data.role;
     if (!role || room.phase !== 'placement' || room.ready[role]) return;
@@ -1420,7 +1575,7 @@ io.on('connection', (socket) => {
   // Der Client ruft dies ggf. mehrfach auf, wenn mehrere Einheiten derselben Art
   // rueckgaengig gemacht werden (Klick auf eine nicht-oberste platzierte Einheit).
   socket.on('undoLastPlacement', ({ roomId, typeKey }) => {
-    const room = rooms[roomId];
+    const room = roomOf(socket, roomId);
     if (!room) return;
     const role = socket.data.role;
     if (!role) return;
@@ -1436,11 +1591,37 @@ io.on('connection', (socket) => {
   });
 
   socket.on('placementReady', ({ roomId }) => {
-    const room = rooms[roomId];
+    const room = roomOf(socket, roomId);
     if (!room) return;
     const role = socket.data.role;
     if (!role || room.phase !== 'placement') return;
+    markPlacementReady(room, role);
+  });
 
+  // Nach einem Wiederverbinden meldet der Client seine komplette Platzierung
+  // erneut (er ist fuer seine eigene, noch offene Platzierung massgeblich) -
+  // deckt Nachrichten ab, die beim Verbindungsabbruch verloren gingen.
+  socket.on('syncPlacement', ({ roomId, placements, ready }) => {
+    const room = roomOf(socket, roomId);
+    if (!room) return;
+    const role = socket.data.role;
+    if (room.phase !== 'placement' || !Array.isArray(placements)) return;
+
+    room.ready[role] = false;
+    room.placements[role] = [];
+    placements.slice(0, UnitTypes.MAX_UNITS_PER_PLAYER).forEach(p => {
+      if (!p || typeof p !== 'object') return;
+      const { typeKey, q, r, facing } = p;
+      if (!isValidPlacement(room, role, typeKey, q, r).ok) return;
+      const unitId = `${role}_${typeKey}_${countOfType(room.placements[role], typeKey) + 1}`;
+      const entry = { unitId, typeKey, q, r };
+      if (UnitTypes.hasFacing(typeKey)) entry.facing = sanitizeFacing(facing, role);
+      room.placements[role].push(entry);
+    });
+    if (ready === true) markPlacementReady(room, role);
+  });
+
+  function markPlacementReady(room, role) {
     room.ready[role] = true;
 
     const otherRole = role === 'blue' ? 'red' : 'blue';
@@ -1456,13 +1637,15 @@ io.on('connection', (socket) => {
       room.positions = positions;
       room.hp = hp;
       room.facings = facings;
-      io.to(roomId).emit('gameStart', { units, positions, hp, facings });
+      room.plans = { blue: null, red: null };
+      room.turn = 1;
+      io.to(room.channel).emit('gameStart', { units, positions, hp, facings, turn: room.turn });
     }
-  });
+  }
 
   // Bereitschaft der Platzierung zurueckziehen, solange der Gegner noch nicht bereit ist
   socket.on('cancelPlacementReady', ({ roomId }) => {
-    const room = rooms[roomId];
+    const room = roomOf(socket, roomId);
     if (!room) return;
     const role = socket.data.role;
     if (!role || room.phase !== 'placement') return;
@@ -1471,12 +1654,29 @@ io.on('connection', (socket) => {
   });
 
   // Ein Spieler reicht die Pläne ALLER seiner Einheiten auf einmal ein
-  socket.on('submitPlan', ({ roomId, plan }) => {
-    const room = rooms[roomId];
+  // resync: true = erneutes Melden nach einem Wiederverbinden (idempotent;
+  // ist die Phase inzwischen aufgeloest, wird es still ignoriert).
+  socket.on('submitPlan', ({ roomId, plan, turn, resync }) => {
+    const room = roomOf(socket, roomId);
     if (!room || room.phase !== 'playing' || room.closing) return;
 
     const role = socket.data.role;
     if (!role) return;
+
+    // Plan aus einer bereits aufgeloesten Phase (oder ohne Nummer) - niemals
+    // fuer die aktuelle Phase uebernehmen.
+    if (turn !== room.turn) {
+      if (resync) return;
+      socket.emit('planRejected', {
+        reason: 'Der Zug gehört zu einer bereits abgelaufenen Phase.',
+        turn: room.turn
+      });
+      return;
+    }
+    if (!plan || typeof plan !== 'object') {
+      socket.emit('planRejected', { reason: 'Ungültiger Zug.', turn: room.turn });
+      return;
+    }
 
     // Besiegte (HP <= 0) Bataillone existieren nicht mehr und werden nicht
     // mehr eingeplant.
@@ -1488,7 +1688,8 @@ io.on('connection', (socket) => {
     if (!isValidRolePlan(plan, room.positions, unitsForRole, room.facings || {}, enemyIds)) {
       const bad = findInvalidRolePlanUnit(plan, room.positions, unitsForRole, room.facings || {}, enemyIds);
       socket.emit('planRejected', {
-        reason: bad.label ? `Ungültiger Zug für ${bad.label}.` : 'Ungültiger Zug.'
+        reason: bad.label ? `Ungültiger Zug für ${bad.label}.` : 'Ungültiger Zug.',
+        turn: room.turn
       });
       return;
     }
@@ -1511,6 +1712,13 @@ io.on('connection', (socket) => {
       room.facings = { ...(room.facings || {}), ...finalFacings };
       room.plans.blue = null;
       room.plans.red = null;
+      const resolvedRound = room.round;
+      const resolvedTurn = room.turn;
+      room.turn += 1;
+      // Verbindlicher Endstand dieser Phase (vor einem evtl. Runden-Reset
+      // erfasst) - der Client gleicht sich nach der Animation daran ab.
+      const finalState = { positions: finalPositions, hp: finalHp, facings: { ...room.facings } };
+      const nextTurn = room.turn;
 
       // Runde entschieden, sobald eine Seite keine Figuren mehr auf dem Feld
       // hat. Beide gleichzeitig leer = Unentschieden (beide bekommen einen Punkt).
@@ -1544,6 +1752,7 @@ io.on('connection', (socket) => {
             winnerName: matchWinner === 'draw' ? null : displayName(room, matchWinner)
           };
           room.closing = true;
+          room.matchResult = matchResult;
         } else {
           resetRoomForNextRound(room);
         }
@@ -1556,44 +1765,41 @@ io.on('connection', (socket) => {
       // (siehe showEndOverlay) selbst neu; das trennt dabei seinen Socket,
       // und der Raum wird ganz normal ueber den disconnect-Handler unten
       // aufgeraeumt, sobald beide Spieler weg sind.
-      io.to(roomId).emit('executeRound', { ticks, roundResult, matchResult });
+      const executePayload = { ticks, roundResult, matchResult, turn: nextTurn, finalState };
+      room.lastExecute = { round: resolvedRound, turn: resolvedTurn, payload: executePayload };
+      io.to(room.channel).emit('executeRound', executePayload);
     }
   });
 
   // Bestätigung zurückziehen, solange der Gegner noch nicht bestätigt hat
-  socket.on('cancelPlan', ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room) return;
+  socket.on('cancelPlan', ({ roomId, turn }) => {
+    const room = roomOf(socket, roomId);
+    if (!room || room.phase !== 'playing') return;
     const role = socket.data.role;
     if (!role) return;
+    // Verspaetetes Zurueckziehen aus einer bereits aufgeloesten Phase ignorieren.
+    if (turn !== room.turn) return;
 
     room.plans[role] = null;
   });
 
-  socket.on('disconnect', () => {
-    console.log('Spieler getrennt:', socket.id);
+  // Verbindungsabbruch: Platz bleibt RECONNECT_GRACE_MS lang reserviert. Erst
+  // wenn der Spieler bis dahin nicht zurueck ist, gilt er als gegangen.
+  socket.on('disconnect', (reason) => {
+    console.log('Spieler getrennt:', socket.id, reason);
     const { roomId, role } = socket.data;
-    const room = rooms[roomId];
-    if (!room) return;
+    const room = roomId && rooms[roomId];
+    if (!room || !role) return;
+    if (room.sockets[role] !== socket.id) return; // bereits durch neue Verbindung ersetzt
 
     delete room.sockets[role];
+    if (room.leaveTimers[role]) clearTimeout(room.leaveTimers[role]);
+    room.leaveTimers[role] = setTimeout(() => finalizeLeave(roomId, room, role), RECONNECT_GRACE_MS);
 
-    if (!room.sockets.blue && !room.sockets.red) {
-      delete rooms[roomId];
-      return;
+    const otherId = room.sockets[otherRoleOf(role)];
+    if (otherId && !room.closing) {
+      io.to(otherId).emit('opponentDisconnected', { graceSeconds: Math.round(RECONNECT_GRACE_MS / 1000) });
     }
-
-    // Match ist bereits (regulaer) zu Ende und die Rueckkehr zum Start laeuft
-    // schon (siehe matchResult oben) - keine zweite Meldung noetig.
-    if (room.closing) return;
-    room.closing = true;
-
-    // Verbleibender Spieler bekommt die Meldung wie beim Sieg-Overlay und
-    // laedt sich nach seinem eigenen 5s-Countdown selbst neu (siehe
-    // showEndOverlay im Client). Kein serverseitiger Timer noetig: sobald
-    // dieser letzte Socket ebenfalls die Verbindung trennt, greift oben der
-    // "beide Spieler weg" -Zweig und raeumt den Raum auf.
-    io.to(roomId).emit('playerLeft');
   });
 });
 
