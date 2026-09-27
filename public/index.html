@@ -31,6 +31,7 @@
         </div>
       </div>
       <button id="manualButtonGame" type="button" class="info-button" aria-label="Spielanleitung anzeigen">i</button>
+      <button id="historyButton" type="button" class="info-button" aria-label="Historie: letzter Zug">h</button>
     </div>
 
     <div id="boardArea">
@@ -93,6 +94,13 @@
     <div class="manual-box">
       <button id="manualClose" class="manual-close" type="button" aria-label="Schließen">×</button>
       <div id="manualContent" class="manual-content"></div>
+    </div>
+  </div>
+
+  <div id="historyOverlay" class="manual-overlay hidden">
+    <div class="manual-box">
+      <button id="historyClose" class="manual-close" type="button" aria-label="Schließen">×</button>
+      <div id="historyContent" class="manual-content"></div>
     </div>
   </div>
 

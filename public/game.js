@@ -424,6 +424,171 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ---------- Historie ("h"-Button): alle Zuege des Matches, blaetterbar ----------
+
+const historyButton = document.getElementById('historyButton');
+const historyOverlay = document.getElementById('historyOverlay');
+const historyContent = document.getElementById('historyContent');
+const historyClose = document.getElementById('historyClose');
+// Liste aller ausgefuehrten Zuege (aelteste zuerst), je Eintrag:
+// { round, turn, units: [{id, role, typeKey, label, chipIndex, start, startHp}],
+//   plans: {unitId: steps[]}, actual: {unitId: [{q, r, hp, fought, blocked} | null]} }
+// - vom Server mit jeder Ausfuehrung (und komplett beim Wiederverbinden) geliefert.
+let historyList = [];
+let historyIndex = -1; // angezeigter Eintrag
+
+function addHistoryEntry(entry) {
+  if (!entry || !Array.isArray(entry.units)) return;
+  const exists = historyList.some(h => h.round === entry.round && h.turn === entry.turn);
+  if (!exists) historyList.push(entry);
+}
+
+function setHistoryList(list) {
+  if (!Array.isArray(list)) return;
+  historyList = list.filter(h => h && Array.isArray(h.units));
+}
+
+// Eine "Real"-Zelle: tatsaechliches Feld nach dem Takt plus Marker
+// (⚔ gekaempft, ⛔ blockiert, −N verlorene Einheiten, ✝ besiegt).
+function fillActualCell(td, unit, actualSteps, i) {
+  const a = actualSteps ? actualSteps[i] : undefined;
+  if (a === undefined) { td.textContent = '-'; return; }
+  if (a === null) {
+    td.textContent = '—';
+    td.classList.add('real-gone');
+    return;
+  }
+  // Vorheriger bekannter Stand (Feld + HP).
+  let prevPos = unit.start;
+  let prevHp = unit.startHp;
+  for (let k = i - 1; k >= 0; k--) {
+    if (actualSteps[k]) { prevPos = actualSteps[k]; prevHp = actualSteps[k].hp; break; }
+  }
+  const parts = [];
+  if (a.q === prevPos.q && a.r === prevPos.r) {
+    parts.push('bleibt');
+    td.classList.add('skip-cell');
+  } else {
+    const { col, row } = HexBoard.labelOf(a.q, a.r);
+    parts.push(`${col},${row}`);
+  }
+  if (a.fought) parts.push('⚔');
+  if (a.blocked) parts.push('⛔');
+  if (prevHp != null && a.hp != null) {
+    const lost = UnitTypes.livingUnitsFor(unit.typeKey, prevHp) - UnitTypes.livingUnitsFor(unit.typeKey, a.hp);
+    if (lost > 0) parts.push(`−${lost}`);
+  }
+  if (a.hp != null && a.hp <= 0) {
+    parts.push('✝');
+    td.classList.add('real-dead');
+  }
+  td.textContent = parts.join(' ');
+}
+
+function buildHistory() {
+  historyContent.innerHTML = '';
+  historyContent.appendChild(mEl('h2', null, 'Historie'));
+  if (historyList.length === 0) {
+    historyContent.appendChild(mEl('p', null, 'Es wurde noch kein Zug ausgeführt.'));
+    return;
+  }
+  historyIndex = Math.max(0, Math.min(historyIndex, historyList.length - 1));
+  const entry = historyList[historyIndex];
+
+  // Navigation: ◀ Runde X · Zug Y (n von N) ▶
+  const nav = mEl('div', 'history-nav');
+  const prev = mEl('button', 'history-nav-button', '◀');
+  prev.type = 'button';
+  prev.setAttribute('aria-label', 'Vorheriger Zug');
+  prev.disabled = historyIndex === 0;
+  prev.addEventListener('click', () => { historyIndex--; buildHistory(); });
+  const next = mEl('button', 'history-nav-button', '▶');
+  next.type = 'button';
+  next.setAttribute('aria-label', 'Nächster Zug');
+  next.disabled = historyIndex === historyList.length - 1;
+  next.addEventListener('click', () => { historyIndex++; buildHistory(); });
+  const title = mEl('div', 'history-nav-title');
+  title.appendChild(mEl('div', 'history-nav-main', `Runde ${entry.round} · Zug ${entry.turn}`));
+  title.appendChild(mEl('div', 'history-nav-sub', `${historyIndex + 1} von ${historyList.length}`));
+  nav.appendChild(prev);
+  nav.appendChild(title);
+  nav.appendChild(next);
+  historyContent.appendChild(nav);
+  historyContent.appendChild(mEl('p', 'history-meta',
+    'Wahl = geplant · Real = tatsächlich · ⚔ Kampf · ⛔ blockiert · −N verlorene Einheiten · ✝ besiegt'));
+
+  const lookup = {};
+  entry.units.forEach(u => { lookup[u.id] = u; });
+
+  // Eigene Figuren zuerst, dann die des Gegners.
+  const roles = myRole === 'red' ? ['red', 'blue'] : ['blue', 'red'];
+  roles.forEach(role => {
+    const units = entry.units.filter(u => u.role === role);
+    if (!units.length) return;
+    const name = (matchNames && matchNames[role]) || (role === 'blue' ? 'Spieler Blau' : 'Spieler Rot');
+    historyContent.appendChild(mEl('h3', `history-player history-player-${role}`,
+      role === myRole ? `${name} (du)` : name));
+
+    units.forEach(u => {
+      const steps = (entry.plans && entry.plans[u.id]) || [];
+      const actualSteps = entry.actual ? entry.actual[u.id] : null;
+      const block = mEl('div', 'history-unit');
+      const { col, row } = HexBoard.labelOf(u.start.q, u.start.r);
+      const living = u.startHp != null ? UnitTypes.livingUnitsFor(u.typeKey, u.startHp) : null;
+      block.appendChild(mEl('div', 'history-unit-label',
+        `${u.label} (Start ${col},${row}${living != null ? `, ${living}/${UnitTypes.BATTALION_SIZE} Einheiten` : ''})`));
+
+      const table = document.createElement('table');
+      table.className = 'history-table';
+      const head = document.createElement('tr');
+      head.appendChild(mEl('th', 'history-row-label', ''));
+      const planRow = document.createElement('tr');
+      planRow.appendChild(mEl('th', 'history-row-label', 'Wahl'));
+      const realRow = document.createElement('tr');
+      realRow.appendChild(mEl('th', 'history-row-label', 'Real'));
+      for (let i = 0; i < UnitTypes.DEFAULT_MAX_STEPS; i++) {
+        head.appendChild(mEl('th', null, `Takt ${i + 1}`));
+        const td = document.createElement('td');
+        if (steps[i]) {
+          const previous = i === 0 ? u.start : steps[i - 1];
+          fillPlanStepCell(td, steps[i], previous, lookup);
+        } else {
+          td.textContent = '-';
+        }
+        planRow.appendChild(td);
+
+        const real = document.createElement('td');
+        real.classList.add('history-real');
+        if (actualSteps) fillActualCell(real, u, actualSteps, i);
+        else real.textContent = '?';
+        realRow.appendChild(real);
+      }
+      table.appendChild(head);
+      table.appendChild(planRow);
+      table.appendChild(realRow);
+      block.appendChild(table);
+      historyContent.appendChild(block);
+    });
+  });
+}
+
+function openHistory() {
+  historyIndex = historyList.length - 1; // immer beim neuesten Zug beginnen
+  buildHistory();
+  historyOverlay.classList.remove('hidden');
+}
+historyButton.addEventListener('click', openHistory);
+historyClose.addEventListener('click', () => historyOverlay.classList.add('hidden'));
+historyOverlay.addEventListener('click', (e) => {
+  if (e.target === historyOverlay) historyOverlay.classList.add('hidden');
+});
+document.addEventListener('keydown', (e) => {
+  if (historyOverlay.classList.contains('hidden')) return;
+  if (e.key === 'Escape') historyOverlay.classList.add('hidden');
+  if (e.key === 'ArrowLeft' && historyIndex > 0) { historyIndex--; buildHistory(); }
+  if (e.key === 'ArrowRight' && historyIndex < historyList.length - 1) { historyIndex++; buildHistory(); }
+});
+
 function mEl(tag, cls, text) {
   const el = document.createElement(tag);
   if (cls) el.className = cls;
@@ -1047,9 +1212,10 @@ socket.on('matchState', (match) => {
 
 socket.on('executeRound', (payload) => { runExecuteRound(payload); });
 
-async function runExecuteRound({ ticks, roundResult, matchResult, turn, finalState }) {
+async function runExecuteRound({ ticks, roundResult, matchResult, turn, finalState, history }) {
   // 1. Ab jetzt ist bis zum Ende der Phase nichts mehr waehl-/klickbar.
   lockPlanningForRound();
+  if (history) addHistoryEntry(history);
   // Schon jetzt die neue Phasen-Nummer merken: bricht die Verbindung waehrend
   // der Animation ab, meldet der Client sich damit korrekt zurueck (diese
   // Ausfuehrung wird ihm dann nicht noch einmal nachgereicht).
@@ -1120,6 +1286,11 @@ function resetMyPlanning() {
 // Raeumt Reste der Animation weg (auch wenn sie mit einem Fehler abbrach).
 function cleanupRoundVisuals() {
   tickDisplay.classList.remove('tick-visible');
+  if (Object.keys(tempHp).length > 0) {
+    const ids = Object.keys(tempHp);
+    tempHp = {};
+    ids.forEach(id => updateHpBar(id));
+  }
   clearArrows();
   cueLayer.innerHTML = '';
   Object.values(hexElements).forEach(el => el.classList.remove('blocked-cell'));
@@ -1357,6 +1528,8 @@ function applyResume(data) {
     mySession.token = data.sessionToken;
     saveSession(mySession);
   }
+  // Komplette Zug-Historie des Matches vom Server uebernehmen.
+  setHistoryList(data.history);
 
   // Verpasste Ausfuehrung (lokaler Stand ist genau davor) - nachspielen.
   if (data.missedRound && myRole === data.role && phase === 'playing' &&
@@ -1601,7 +1774,7 @@ function showPlacementFacingChooser(q, r) {
     const uy = n.y - c.y;
     const arrow = document.createElementNS(SVG_NS, 'polygon');
     const M = CHIP_RADIUS;
-    arrow.setAttribute('points', `${M * 2.3},0 ${M * 0.15},${-M * 1.15} ${M * 0.15},${M * 1.15}`);
+    arrow.setAttribute('points', `${M * 1.6},0 ${M * 0.15},${-M * 1.15} ${M * 0.15},${M * 1.15}`);
     arrow.setAttribute('transform',
       `translate(${c.x + ux * 0.55}, ${c.y + uy * 0.55}) rotate(${Math.atan2(uy, ux) * 180 / Math.PI})`);
     arrow.classList.add('placement-facing-arrow');
@@ -1833,6 +2006,16 @@ function positionHpBar(unitId, x, y) {
   bar.group.setAttribute('transform', `translate(${x}, ${y - HP_BAR_OFFSET})`);
 }
 
+// Temporaerer HP-Stand waehrend eines Takts: Nahkampf-Treffer ziehen zuerst
+// nur hiervon ab (im Balken als eigens markierte Segmente); erst am Takt-Ende
+// wird er zum echten Stand (commitTempHp) - dann verschwinden auch Figuren
+// mit 0 Leben. Bogenschuss-Schaden wirkt dagegen sofort echt.
+let tempHp = {};
+
+function shownTempHp(unitId) {
+  return tempHp[unitId] != null ? tempHp[unitId] : hp[unitId];
+}
+
 function updateHpBar(unitId) {
   const bar = hpBarElements[unitId];
   const unit = unitsById[unitId];
@@ -1840,17 +2023,21 @@ function updateHpBar(unitId) {
 
   const maxHp = UnitTypes.maxHpFor(unit.typeKey);
   const currentHp = hp[unitId];
-  if (currentHp == null || currentHp >= maxHp) {
+  const temp = shownTempHp(unitId);
+  if (currentHp == null || (currentHp >= maxHp && temp >= maxHp)) {
     bar.group.classList.add('hidden');
     return;
   }
 
   const livingUnits = UnitTypes.livingUnitsFor(unit.typeKey, currentHp);
+  const livingTemp = Math.min(livingUnits, UnitTypes.livingUnitsFor(unit.typeKey, temp));
 
-  // Lebende Segmente bleiben immer gruen (keine Farbaenderung nach HP-Anteil).
+  // Lebende Segmente bleiben immer gruen (keine Farbaenderung nach HP-Anteil);
+  // in diesem Takt (noch temporaer) verlorene Segmente sind markiert.
   bar.segments.forEach((segment, i) => {
-    segment.classList.remove('hp-bar-dead');
-    segment.classList.toggle('hp-bar-dead', i >= livingUnits);
+    segment.classList.remove('hp-bar-dead', 'hp-bar-temp');
+    if (i >= livingUnits) segment.classList.add('hp-bar-dead');
+    else if (i >= livingTemp) segment.classList.add('hp-bar-temp');
   });
   bar.group.classList.remove('hidden');
 }
@@ -1896,6 +2083,7 @@ async function animateHpDrain(unitId, hpAfter, duration) {
   for (let k = 0; k < lost; k++) {
     const segment = bar.segments[livingBefore - 1 - k];
     setTimeout(() => {
+      segment.classList.remove('hp-bar-temp');
       segment.classList.add('hp-bar-dying');
       setTimeout(() => {
         segment.classList.remove('hp-bar-dying');
@@ -1923,6 +2111,135 @@ function spawnDamageLabel(unitId, lostUnits) {
   holder.appendChild(label);
   hpBarLayer.appendChild(holder);
   setTimeout(() => holder.remove(), DAMAGE_LABEL_DURATION);
+}
+
+// ---------- Temporaerer Schaden: wer trifft wen ----------
+
+const HIT_CUE_LEAD = 250;        // Angreifer leuchtet auf, bevor er zuschlaegt
+const HIT_LUNGE_OUT = 170;       // schneller Ausfallschritt Richtung Ziel
+const HIT_LUNGE_BACK = 260;      // zurueck auf die Ausgangsposition
+const HIT_LUNGE_FRACTION = 0.4;  // Anteil der Strecke zum Ziel
+const HIT_HOLD = 550;            // Treffer steht sichtbar
+const HIT_GAP = 150;             // Pause bis zum naechsten Treffer
+const TEMP_COMMIT_DURATION = 700;
+
+// Aktueller Mittelpunkt eines Chips (auch waehrend er auf einem
+// Viertel-Schritt steht) - aus seinem transform-Attribut.
+function chipCenter(unitId) {
+  const el = unitElements[unitId];
+  if (!el) return null;
+  const m = /translate\(\s*([-\d.e]+)[ ,]+([-\d.e]+)\s*\)/.exec(el.getAttribute('transform') || '');
+  if (!m) return null;
+  return { x: Number(m[1]) + UNIT_CHIP_SIZE / 2, y: Number(m[2]) + UNIT_CHIP_SIZE / 2 };
+}
+
+// Kurzer Treffer-Blitz auf dem Ziel in der Team-Farbe des Angreifers.
+function spawnHitBurst(x, y, role) {
+  const g = document.createElementNS(SVG_NS, 'g');
+  g.setAttribute('transform', `translate(${x}, ${y})`);
+  const burst = document.createElementNS(SVG_NS, 'polygon');
+  const R = CHIP_RADIUS * 1.25;
+  const pts = [];
+  for (let i = 0; i < 16; i++) {
+    const rr = i % 2 === 0 ? R : R * 0.45;
+    const a = (i / 16) * Math.PI * 2;
+    pts.push(`${(Math.cos(a) * rr).toFixed(2)},${(Math.sin(a) * rr).toFixed(2)}`);
+  }
+  burst.setAttribute('points', pts.join(' '));
+  burst.classList.add('hit-burst', `hit-burst-${role}`);
+  g.appendChild(burst);
+  arrowLayer.appendChild(g);
+  setTimeout(() => g.remove(), 700);
+}
+
+// EIN Treffer: der Angreifer leuchtet auf und macht einen schnellen
+// Ausfallschritt auf das Ziel zu; beim Kontakt blitzt es am Ziel (Farbe des
+// Angreifers), und der TEMPORAERE Balken des Ziels sinkt (mit "−N"
+// verlorenen Einheiten). Danach springt der Angreifer zurueck.
+async function animateHit(hit) {
+  const target = unitsById[hit.to];
+  const attacker = unitsById[hit.from];
+  const from = chipCenter(hit.from);
+  const to = chipCenter(hit.to);
+  if (!target || !attacker || !from || !to) return;
+
+  const attackerChip = unitElements[hit.from];
+  if (attackerChip) attackerChip.classList.add('unit-striking', `unit-striking-${attacker.role}`);
+  await wait(HIT_CUE_LEAD);
+
+  const lunge = {
+    x: from.x + (to.x - from.x) * HIT_LUNGE_FRACTION,
+    y: from.y + (to.y - from.y) * HIT_LUNGE_FRACTION
+  };
+  setMoveDuration(hit.from, HIT_LUNGE_OUT);
+  moveUnitTo(hit.from, lunge.x, lunge.y);
+  await wait(HIT_LUNGE_OUT);
+  spawnHitBurst(to.x, to.y, attacker.role);
+
+  const before = shownTempHp(hit.to);
+  const after = Math.max(0, before - hit.damage);
+  tempHp[hit.to] = after;
+  const lost = UnitTypes.livingUnitsFor(target.typeKey, before) - UnitTypes.livingUnitsFor(target.typeKey, after);
+
+  const chip = unitElements[hit.to];
+  if (chip) {
+    chip.classList.remove('unit-hit');
+    void getComputedStyle(chip).animationName;
+    chip.classList.add('unit-hit');
+    setTimeout(() => chip.classList.remove('unit-hit'), HP_HIT_FLASH_DURATION);
+  }
+  const bar = hpBarElements[hit.to];
+  if (bar) {
+    bar.group.classList.remove('hp-bar-hit');
+    void bar.group.getBoundingClientRect();
+    bar.group.classList.add('hp-bar-hit');
+    setTimeout(() => bar.group.classList.remove('hp-bar-hit'), HP_DRAIN_DURATION);
+  }
+  updateHpBar(hit.to);
+  spawnDamageLabel(hit.to, lost);
+
+  // Zurueck auf die Ausgangsposition (auch Viertel-Schritt), falls noch da.
+  if (unitElements[hit.from]) {
+    setMoveDuration(hit.from, HIT_LUNGE_BACK);
+    moveUnitTo(hit.from, from.x, from.y);
+  }
+  await wait(HIT_HOLD);
+  if (attackerChip) attackerChip.classList.remove('unit-striking', `unit-striking-${attacker.role}`);
+  if (unitElements[hit.from]) setMoveDuration(hit.from, BASE_MOVE_DURATION);
+  await wait(HIT_GAP);
+}
+
+// Takt-Ende: temporaere Staende werden echt - markierte Segmente erloeschen,
+// Figuren mit 0 Leben verschwinden.
+async function commitTempHp() {
+  const entries = Object.entries(tempHp).filter(([id]) => unitsById[id]);
+  tempHp = {};
+  if (entries.length === 0) return;
+
+  let anyDefeated = false;
+  entries.forEach(([id, value]) => {
+    if (value <= 0) {
+      anyDefeated = true;
+      hp[id] = 0;
+      removeDefeatedUnit(id);
+      return;
+    }
+    if (value >= hp[id]) { updateHpBar(id); return; }
+    hp[id] = value;
+    const bar = hpBarElements[id];
+    if (!bar) return;
+    bar.segments.forEach(segment => {
+      if (!segment.classList.contains('hp-bar-temp')) return;
+      segment.classList.remove('hp-bar-temp');
+      segment.classList.add('hp-bar-dying');
+      setTimeout(() => {
+        segment.classList.remove('hp-bar-dying');
+        segment.classList.add('hp-bar-dead');
+      }, HP_SEGMENT_FADE);
+    });
+    setTimeout(() => updateHpBar(id), HP_SEGMENT_FADE + 50);
+  });
+  await wait(anyDefeated ? Math.max(DEFEAT_FADE_DURATION, TEMP_COMMIT_DURATION) : TEMP_COMMIT_DURATION);
 }
 
 // Positioniert Chip UND HP-Balken gemeinsam - wird sowohl fuer die normale
@@ -2124,6 +2441,32 @@ const INTERCEPT_TARGET_SHORT_LABEL = {
   schwertkaempfer: 'Schwert'
 };
 
+// Fuellt eine Takt-Zelle mit der Anzeige EINES geplanten Schritts (Feld,
+// bleibt, Schuss, Drehung, Abfangen). `unitLookup` loest das Abfang-Ziel auf
+// - auch fuer die Historie, in der das Ziel schon besiegt sein kann.
+function fillPlanStepCell(td, step, previous, unitLookup) {
+  const isSkip = previous.q === step.q && previous.r === step.r;
+  if (step.shot != null) {
+    const cfg = UnitTypes.shotConfig('bogenschuetze', step.shot.type);
+    td.textContent = `🏹 ${cfg ? cfg.label : ''}`;
+    td.classList.add('shot-cell');
+  } else if (step.turn != null) {
+    td.textContent = `⟳ ${screenArrowGlyph(step.turn)}`;
+    td.classList.add('turn-cell');
+  } else if (step.intercept != null) {
+    const tgt = unitLookup[step.intercept];
+    const shortLabel = tgt ? (INTERCEPT_TARGET_SHORT_LABEL[tgt.typeKey] || tgt.label) : null;
+    td.textContent = `🎯 ${tgt ? `${shortLabel} ${tgt.chipIndex}` : '?'}`;
+    td.classList.add('intercept-cell');
+  } else if (isSkip) {
+    td.textContent = 'bleibt';
+    td.classList.add('skip-cell');
+  } else {
+    const { col, row } = HexBoard.labelOf(step.q, step.r);
+    td.textContent = `${col},${row}`;
+  }
+}
+
 // Tabelle horizontal: Kopfzeile = Takt-Nummern, Datenzeile = gewähltes Feld.
 // Zellen anklickbar: leere (nächste) Zelle = aussetzen, gefüllte Zelle =
 // diesen Schritt + alle danach rückgängig machen.
@@ -2142,27 +2485,7 @@ function renderPlanTable() {
 
     if (plan[i]) {
       const previous = i === 0 ? positions[selectedUnitId] : plan[i - 1];
-      const isSkip = previous.q === plan[i].q && previous.r === plan[i].r;
-
-      if (plan[i].shot != null) {
-        const cfg = UnitTypes.shotConfig('bogenschuetze', plan[i].shot.type);
-        td.textContent = `🏹 ${cfg ? cfg.label : ''}`;
-        td.classList.add('shot-cell');
-      } else if (plan[i].turn != null) {
-        td.textContent = `⟳ ${screenArrowGlyph(plan[i].turn)}`;
-        td.classList.add('turn-cell');
-      } else if (plan[i].intercept != null) {
-        const tgt = unitsById[plan[i].intercept];
-        const shortLabel = tgt ? (INTERCEPT_TARGET_SHORT_LABEL[tgt.typeKey] || tgt.label) : null;
-        td.textContent = `🎯 ${tgt ? `${shortLabel} ${tgt.chipIndex}` : '?'}`;
-        td.classList.add('intercept-cell');
-      } else if (isSkip) {
-        td.textContent = 'bleibt';
-        td.classList.add('skip-cell');
-      } else {
-        const { col, row } = HexBoard.labelOf(plan[i].q, plan[i].r);
-        td.textContent = `${col},${row}`;
-      }
+      fillPlanStepCell(td, plan[i], previous, unitsById);
 
       if (!confirmed) {
         td.classList.add('clickable-cell');
@@ -2783,15 +3106,35 @@ async function animateBlockedAttempt(attempt) {
 // Ursprungsfeld; besiegte Bataillone werden danach endgueltig entfernt.
 // animateRound ruft dies fuer mehrere Kaempfe desselben Takts NACHEINANDER
 // auf, genau wie bei mehreren Blockaden.
-async function animateCombatEvent(event, tickWinners = new Set()) {
+// Kampf, in dem nur EINE Seite Schaden zufuegt (z.B. Abfaenger ohne
+// Gegenschaden, Verteidiger der diesen Takt schon zugeschlagen hat): keine
+// eigene Kampf-Inszenierung (Feld-Markierung, Ankuendigung, Pausen), nur die
+// Treffer selbst.
+function isOneWayCombat(event) {
+  if (!Array.isArray(event.hits) || event.hits.length === 0) return false;
+  const roles = new Set(event.hits.map(h => unitsById[h.from] ? unitsById[h.from].role : h.from));
+  return roles.size === 1;
+}
+
+async function animateCombatEvent(event, tickWinners = new Set(), light = false) {
   const { cells, participants, moverId } = event;
 
-  const cellEls = [...new Set(cells.map(c => hexElements[HexBoard.keyOf(c.q, c.r)]))].filter(Boolean);
+  const cellEls = light ? [] : [...new Set(cells.map(c => hexElements[HexBoard.keyOf(c.q, c.r)]))].filter(Boolean);
   cellEls.forEach(el => el.classList.add('combat-cell'));
-  await wait(COMBAT_MARK_HOLD);
+  if (!light) await wait(COMBAT_MARK_HOLD);
 
-  await Promise.all(participants.map(p => animateHpDrain(p.unitId, p.hpAfter, HP_DRAIN_DURATION)));
-  await wait(HP_AFTER_HOLD);
+  // Wer trifft wen - nacheinander, nur auf den temporaeren Balken. (Ohne
+  // Treffer-Liste, z.B. alter Server-Stand: direkt den Endstand markieren.)
+  if (Array.isArray(event.hits)) {
+    for (const hit of event.hits) await animateHit(hit);
+  } else {
+    participants.forEach(p => {
+      if (!unitsById[p.unitId]) return;
+      tempHp[p.unitId] = Math.min(shownTempHp(p.unitId), p.hpAfter);
+      updateHpBar(p.unitId);
+    });
+  }
+  if (!light) await wait(HP_AFTER_HOLD);
 
   // Nahschuss-Sonderfall: der Schuetze wurde vernichtet und der Angreifer aus
   // der Schuss-Richtung rueckt nach. Reihenfolge: Schuetze verschwindet ->
@@ -2799,7 +3142,7 @@ async function animateCombatEvent(event, tickWinners = new Set()) {
   // (Phase 3) der Angreifer rueckt ganz auf das Schuetzen-Feld.
   if (event.arrowImpact) {
     const early = participants.filter(p => p.defeated && unitsById[p.unitId]);
-    early.forEach(p => removeDefeatedUnit(p.unitId));
+    early.forEach(p => { delete tempHp[p.unitId]; removeDefeatedUnit(p.unitId); });
     if (early.length > 0) await wait(DEFEAT_FADE_DURATION);
     const hitPart = participants.find(p => p.unitId === event.arrowImpact.unitId);
     await animateDeferredArrowHit(event.arrowImpact, hitPart);
@@ -2811,17 +3154,15 @@ async function animateCombatEvent(event, tickWinners = new Set()) {
   // Wer in einem ANDEREN Ereignis dieses Takts siegreich vorrueckt (z.B.
   // Angreifer, der zusaetzlich auf seinem Ursprungsfeld abgefangen wurde),
   // weicht hier nicht zurueck - er rueckt in Phase 3 nach.
+  // Auch besiegte Figuren gehen zurueck - sie verschwinden erst am Takt-Ende
+  // (commitTempHp), wenn der temporaere Balken echt wird.
   const retreatIds = participants
-    .filter(p => p.unitId !== moverId && !p.defeated && !tickWinners.has(p.unitId) && unitsById[p.unitId])
+    .filter(p => p.unitId !== moverId && !tickWinners.has(p.unitId) && unitsById[p.unitId])
     .map(p => p.unitId);
   retreatIds.forEach(id => setMoveDuration(id, RETREAT_MOVE_DURATION));
   retreatIds.forEach(id => renderUnit(id));
   if (retreatIds.length > 0) await wait(RETREAT_MOVE_DURATION);
   retreatIds.forEach(id => setMoveDuration(id, BASE_MOVE_DURATION));
-
-  const defeated = participants.filter(p => p.defeated && unitsById[p.unitId]);
-  defeated.forEach(p => removeDefeatedUnit(p.unitId));
-  if (defeated.length > 0) await wait(DEFEAT_FADE_DURATION);
 
   cellEls.forEach(el => el.classList.remove('combat-cell'));
 }
@@ -2841,9 +3182,16 @@ async function animateDeferredArrowHit(impact, hitPart) {
     a.el.remove();
     delete activeArrows[impact.arrowId];
   }
-  await animateHpDrain(impact.unitId, impact.hpAfter, HP_DRAIN_DURATION);
+  // Pfeil-Schaden wirkt sofort echt (nicht temporaer): echten UND
+  // temporaeren Stand um den Pfeil-Schaden senken.
+  const arrowDmg = Math.max(0, impact.hpBefore - impact.hpAfter);
+  if (tempHp[impact.unitId] != null) tempHp[impact.unitId] = impact.hpAfter;
+  if (hp[impact.unitId] != null) {
+    await animateHpDrain(impact.unitId, Math.max(0, hp[impact.unitId] - arrowDmg), HP_DRAIN_DURATION);
+  }
   await wait(HP_AFTER_HOLD);
   if (impact.defeated && unitsById[impact.unitId]) {
+    delete tempHp[impact.unitId];
     removeDefeatedUnit(impact.unitId);
     await wait(DEFEAT_FADE_DURATION);
   }
@@ -3212,16 +3560,25 @@ async function animateRound(ticks) {
           run: () => animateBlockedAttempt(attempt),
           gap: 0
         })),
-        ...combatEvents.map((event, i) => ({
-          kind: 'combat',
-          label: `Kampf ${i + 1} von ${combatEvents.length}`,
-          cells: event.cells,
-          unitIds: event.participants.map(p => p.unitId),
-          run: () => animateCombatEvent(event, tickWinners),
-          gap: COMBAT_GAP_DURATION
-        }))
+        ...(() => {
+          const full = combatEvents.filter(ev => !isOneWayCombat(ev));
+          return combatEvents.map(event => {
+            const light = isOneWayCombat(event);
+            return {
+              kind: 'combat',
+              light,
+              label: light ? 'Treffer' : `Kampf ${full.indexOf(event) + 1} von ${full.length}`,
+              cells: light ? [] : event.cells,
+              unitIds: event.participants.map(p => p.unitId),
+              run: () => animateCombatEvent(event, tickWinners, light),
+              gap: light ? 0 : COMBAT_GAP_DURATION
+            };
+          });
+        })()
       ];
-      if (hasConflict) {
+      // Nur "echte" Konflikte (Blockaden, Kaempfe mit Schaden in beide
+      // Richtungen) pausieren den Takt und werden angekuendigt.
+      if (actions.some(a => !a.light)) {
         showPendingCues(actions);
         await wait(TICK_PAUSE_HOLD); // Takt pausiert - Konflikte werden sichtbar
       }
@@ -3229,16 +3586,20 @@ async function animateRound(ticks) {
         const action = actions[i];
         tickDisplay.textContent = `${tickLabel} · ${action.label}`;
         showPendingCues(actions.slice(i + 1));
-        const cleanup = await announceAction(action);
+        const cleanup = action.light ? () => {} : await announceAction(action);
         await action.run();
         cleanup();
         if (action.gap) await wait(action.gap);
       }
       tickDisplay.textContent = tickLabel;
 
+      // Takt-Ende der Kaempfe: temporaere Balken werden echt, Figuren mit 0
+      // Leben verschwinden - erst danach ruecken Sieger nach.
+      await commitTempHp();
+
       // Phase 3: die verbleibenden, nicht behandelten Bewegungen (inkl.
       // siegreicher Kampf-Gewinner) vom Viertel-Schritt aus zu Ende fuehren.
-      const finishers = attemptingIds.filter(id => !handledIds.has(id));
+      const finishers = attemptingIds.filter(id => !handledIds.has(id) && unitsById[id]);
       finishers.forEach(unitId => setMoveDuration(unitId, REMAINDER_MOVE_DURATION));
       finishers.forEach(unitId => {
         positions[unitId] = tickPositions[unitId];

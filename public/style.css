@@ -236,6 +236,33 @@ body {
   transition: fill 0.35s ease, opacity 0.35s ease;
 }
 .hp-bar-segment.hp-bar-dead { fill: #333; opacity: 0.5; }
+/* In diesem Takt verloren, aber noch temporaer (wird erst am Takt-Ende echt). */
+.hp-bar-segment.hp-bar-temp { fill: #ff9800; animation: hp-temp-pulse 0.9s ease-in-out infinite alternate; }
+@keyframes hp-temp-pulse {
+  from { opacity: 1; }
+  to   { opacity: 0.45; }
+}
+
+/* Nahkampf "wer trifft wen": der Angreifer leuchtet in seiner Team-Farbe
+   auf und macht einen Ausfallschritt; am Ziel blitzt ein Treffer-Stern. */
+.unit.unit-striking.unit-striking-blue { filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 7px #1f5fd6) brightness(1.15); }
+.unit.unit-striking.unit-striking-red  { filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 7px #d62f2f) brightness(1.15); }
+.hit-burst {
+  pointer-events: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: hit-burst 0.6s ease-out forwards;
+}
+.hit-burst-blue { fill: #1f5fd6; }
+.hit-burst-red  { fill: #d62f2f; }
+@keyframes hit-burst {
+  0%   { transform: scale(0.3) rotate(0deg);  opacity: 0.95; }
+  40%  { transform: scale(1)   rotate(20deg); opacity: 0.9; }
+  100% { transform: scale(1.3) rotate(35deg); opacity: 0; }
+}
 /* Segment, das gerade verloren geht: kurz hell-rot aufleuchten, bevor es
    (weich, per transition) in den "tot"-Zustand uebergeht. */
 .hp-bar-segment.hp-bar-dying { fill: #ff3b30; opacity: 1; transition: none; }
@@ -593,6 +620,60 @@ body {
 }
 .manual-content h2:first-child { margin-top: 0; }
 .manual-content h3 { font-size: 16px; margin: 12px 0 4px; }
+
+/* ---------- Historie (h-Button): Takt-Tabellen des letzten Zugs ---------- */
+.history-meta { color: #666; font-size: 12px !important; }
+.history-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 0 4px;
+}
+.history-nav-title { text-align: center; flex: 1 1 auto; }
+.history-nav-main { font-weight: 700; font-size: 16px; }
+.history-nav-sub { font-size: 12px; color: #777; }
+.history-nav-button {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 34px;
+  border: 1.5px solid #888;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+.history-nav-button:hover:not(:disabled) { background: #f0f0f0; }
+.history-nav-button:disabled { opacity: 0.35; cursor: default; }
+.history-table th.history-row-label {
+  width: 48px;
+  font-size: 12px;
+  background: #f4f4ef;
+}
+.history-table td.history-real { background: #fafaf6; font-weight: 500; }
+.history-table td.real-dead { color: #b3261e; font-weight: 700; }
+.history-table td.real-gone { color: #aaa; }
+.history-player { padding-left: 8px; border-left: 5px solid #999; }
+.history-player-blue { border-left-color: #3366cc; color: #1f4a99; }
+.history-player-red  { border-left-color: #cc3333; color: #992626; }
+.history-unit { margin: 8px 0 12px; }
+.history-unit-label { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+.history-table {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: fixed;
+}
+.history-table th, .history-table td {
+  border: 2px solid #888;
+  padding: 3px 2px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 600;
+}
+.history-table th {
+  background: #e8e8e0;
+  color: #333;
+}
 .manual-content p { font-size: 14px; line-height: 1.5; margin: 4px 0; }
 .manual-content ul { font-size: 14px; line-height: 1.5; margin: 4px 0; padding-left: 20px; }
 
